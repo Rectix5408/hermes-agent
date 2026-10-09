@@ -86,6 +86,17 @@ class AudioTranscriptionRequest(BaseModel):
     data_url: str
     mime_type: Optional[str] = None
 
+class JarvisOrchestrationRequest(BaseModel):
+    request: str
+    payload: dict[str, Any] = {}
+    limits: dict[str, Any] = {}
+
+class JarvisApprovalDecision(BaseModel):
+    decision: Literal["approve", "deny"]
+
+class JarvisSettingsUpdate(BaseModel):
+    settings: dict[str, Any] = {}
+
 class ManagedFileUpload(BaseModel):
     path: str
     data_url: str
@@ -545,4 +556,3 @@ class _PluginProvidersPutBody(BaseModel):
 
 class _PluginVisibilityBody(BaseModel):
     hidden: bool
-

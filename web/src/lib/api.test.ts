@@ -118,6 +118,7 @@ describe("management profile scope", () => {
   it.each([
     "/api/credentials/pool/anthropic/0",
     "/api/dashboard/plugin-providers",
+    "/api/jarvis/status",
     "/api/model/recommended-default",
     "/api/local-models",
     "/api/ops/restart",
@@ -284,6 +285,124 @@ describe("api OAuth helpers", () => {
       "/api/providers/oauth/anthropic/submit?profile=worker",
       "/api/providers/oauth/anthropic/poll/oauth-session?profile=worker",
       "/api/providers/oauth/sessions/oauth-session?profile=worker",
+    ]);
+  });
+});
+
+describe("api.jarvis", () => {
+  it("plans Jarvis tasks through the authenticated profile-scoped endpoint", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ status: "planned" });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("default");
+
+    await api.planJarvis({
+      request: "Plane Instagram Content",
+      payload: { brand: "Jarvis" },
+      limits: { max_agents: 1 },
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/jarvis/orchestrator/plan?profile=default",
+    );
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      credentials: "include",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      request: "Plane Instagram Content",
+      payload: { brand: "Jarvis" },
+      limits: { max_agents: 1 },
+    });
+  });
+
+  it("runs a selected Jarvis agent without a shell endpoint", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ agent_id: "email", status: "drafted" });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("default");
+
+    await api.runJarvisAgent("email", { request: "Triagiere die Inbox" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/jarvis/orchestrator/agent/email?profile=default",
+    );
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      credentials: "include",
+    });
+  });
+
+  it("reads persisted Jarvis runs through the selected profile", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ ok: true, runs: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("default");
+
+    await api.getJarvisRuns(8);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/jarvis/runs?limit=8&profile=default",
+    );
+  });
+
+  it("updates Jarvis settings server-side", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ ok: true, config: { routing_mode: "smart" } });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("default");
+
+    await api.updateJarvisSettings({ "jarvis.routing_mode": "smart" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/jarvis/settings?profile=default",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      settings: { "jarvis.routing_mode": "smart" },
+    });
+  });
+
+  it("decides persisted Jarvis approvals by id only", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ ok: true, executed: false });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("default");
+
+    await api.decideJarvisApproval("appr-1", "deny");
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/jarvis/approvals/appr-1?profile=default",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      decision: "deny",
+    });
+  });
+
+  it("reads persisted Jarvis approvals through the selected profile", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ ok: true, pending: [], history: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("default");
+
+    await api.getJarvisApprovals();
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/jarvis/approvals?profile=default",
+    );
+  });
+
+  it("uses existing audio endpoints for Jarvis voice", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ ok: true, transcript: "Hallo" });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("default");
+
+    await api.transcribeAudio("data:audio/webm;base64,AAAA", "audio/webm");
+    await api.speakText("Hallo");
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/audio/transcribe?profile=default",
+      "/api/audio/speak?profile=default",
     ]);
   });
 });
