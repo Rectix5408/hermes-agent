@@ -49,3 +49,32 @@ jobs:
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
           ELEVENLABS_API_KEY: ''
+
+  jarvis-web:
+    name: Jarvis web validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OPENROUTER_API_KEY: ''
+      OPENAI_API_KEY: ''
+      NOUS_API_KEY: ''
+      ELEVENLABS_API_KEY: ''
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - name: Set up locked Node toolchain
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: node
+
+      - name: Install locked Node dependencies
+        run: npm ci
+
+      - name: Typecheck Jarvis dashboard
+        run: npm --workspace web run typecheck
+
+      - name: Test Jarvis web API
+        run: npm --workspace web test -- --run src/lib/api.test.ts
+
+      - name: Build Jarvis dashboard
+        run: npm --workspace web run build
