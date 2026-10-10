@@ -1,0 +1,3 @@
+import type { ContextItem } from '../../context/context-types'
+const color = { high: 'border-cyan-300/35', medium: 'border-slate-500/35', low: 'border-white/10' }
+export function ContextCard({ item, selected, onSelect }: { item: ContextItem; selected: boolean; onSelect: (id: string) => void }) { return <button type="button" onClick={() => onSelect(item.id)} className={`w-full border p-3 text-left ${selected ? 'border-cyan-300/70 bg-cyan-300/[0.08]' : color[item.priority]}`}><p className="text-sm font-medium text-slate-100">{item.label}</p><p className="mt-1 truncate text-xs text-slate-500">{item.detail}</p><p className="mt-2 text-[10px] uppercase tracking-[.1em] text-cyan-200/70">{item.source} · {item.priority}</p></button> }

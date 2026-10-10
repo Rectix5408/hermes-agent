@@ -1,0 +1,6 @@
+import { Mic, Volume2, Waves } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import type { JarvisVisualProps } from '../types'
+
+export function VoiceStatus({ status, voiceBusy }: Pick<JarvisVisualProps, 'status' | 'voiceBusy'>) { const listening = voiceBusy === 'recording' || voiceBusy === 'transcribing'; return <section className="border border-white/10 bg-slate-950/80 p-5"><div className="flex items-center justify-between"><p className="text-xs uppercase tracking-[0.18em] text-slate-500">Voice interface</p><Waves className={cn('h-4 w-4 text-cyan-300', listening && 'animate-pulse')} /></div><div className="mt-4 grid grid-cols-2 gap-3 text-sm"><VoiceCell icon={Mic} label="Input" value={listening ? 'Listening' : status?.voice.stt.configured ? 'Standby' : 'Inactive'} /><VoiceCell icon={Volume2} label="Voice" value={voiceBusy === 'speaking' ? 'Speaking' : status?.voice.tts.provider ?? 'Not configured'} /></div><p className="mt-4 text-xs text-slate-500">API-ready · volume & device controls reserved</p></section> }
+function VoiceCell({ icon: Icon, label, value }: { icon: typeof Mic; label: string; value: string }) { return <div className="border border-white/10 bg-white/[0.025] p-3"><Icon className="h-4 w-4 text-cyan-300" /><p className="mt-2 text-xs text-slate-500">{label}</p><p className="mt-1 truncate text-sm text-slate-200">{value}</p></div> }

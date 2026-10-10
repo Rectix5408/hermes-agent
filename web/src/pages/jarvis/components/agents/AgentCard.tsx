@@ -1,0 +1,6 @@
+import { Bot, CheckCircle2, Circle, Clock3, TriangleAlert } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import type { JarvisAgent } from './agent-data'
+
+const tone: Record<JarvisAgent['status'], string> = { idle: 'text-slate-400', running: 'text-cyan-300', waiting: 'text-amber-300', completed: 'text-emerald-300', error: 'text-rose-300' }
+export function AgentCard({ agent, selected, onSelect }: { agent: JarvisAgent; selected: boolean; onSelect: (id: string) => void }) { const Icon = agent.status === 'completed' ? CheckCircle2 : agent.status === 'waiting' ? Clock3 : agent.status === 'error' ? TriangleAlert : agent.status === 'idle' ? Circle : Bot; return <button type="button" onClick={() => onSelect(agent.id)} className={cn('w-full border p-4 text-left transition hover:border-cyan-300/40', selected ? 'border-cyan-300/60 bg-cyan-300/[0.07]' : 'border-white/10 bg-white/[0.025]')}><div className="flex items-center justify-between gap-3"><span className="font-medium text-slate-100">{agent.name}</span><span className={cn('flex items-center gap-1 text-xs capitalize', tone[agent.status])}><Icon className={cn('h-3.5 w-3.5', agent.status === 'running' && 'animate-pulse')} />{agent.status}</span></div><p className="mt-3 truncate text-sm text-slate-300">{agent.currentTask}</p><p className="mt-2 text-xs text-slate-500">{agent.tools.join(' · ')}</p></button> }

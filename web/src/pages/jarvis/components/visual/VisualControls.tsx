@@ -1,0 +1,3 @@
+export type VisualMode = 'focus' | 'neural' | 'system' | 'minimal'
+const labels: Record<VisualMode, string> = { focus: 'Focus Mode', neural: 'Neural View', system: 'System View', minimal: 'Minimal Mode' }
+export function VisualControls({ mode, onChange }: { mode: VisualMode; onChange: (mode: VisualMode) => void }) { return <div className="flex flex-wrap gap-2">{(Object.keys(labels) as VisualMode[]).map(item => <button type="button" key={item} onClick={() => onChange(item)} className={`border px-3 py-1.5 text-xs ${mode === item ? 'border-cyan-300/60 bg-cyan-300/10 text-cyan-100' : 'border-white/10 text-slate-400 hover:text-slate-200'}`}>{labels[item]}</button>)}</div> }

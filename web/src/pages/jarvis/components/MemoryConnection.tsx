@@ -1,0 +1,2 @@
+interface MemoryConnectionProps { from: { x: number; y: number }; to: { x: number; y: number }; highlighted: boolean }
+export function MemoryConnection({ from, to, highlighted }: MemoryConnectionProps) { return <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke={highlighted ? '#67e8f9' : 'rgba(100,116,139,0.35)'} strokeWidth={highlighted ? 0.9 : 0.45} strokeDasharray={highlighted ? '2 1.5' : undefined}>{highlighted && <animate attributeName="stroke-dashoffset" from="8" to="0" dur="0.8s" repeatCount="indefinite" />}</line> }

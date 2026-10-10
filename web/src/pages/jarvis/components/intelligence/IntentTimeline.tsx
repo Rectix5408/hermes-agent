@@ -1,0 +1,4 @@
+import { ChevronRight } from 'lucide-react'
+import { PriorityIndicator } from './PriorityIndicator'
+import type { IntelligenceResult } from '../../intelligence/types'
+export function IntentTimeline({ results }: { results: IntelligenceResult[] }) { return <section className="border border-white/10 bg-slate-950/80 p-5"><p className="text-xs uppercase tracking-[0.18em] text-slate-500">Intent Timeline</p><div className="mt-4 space-y-3">{results.map(result => <div key={result.intent.id} className="flex items-center gap-3 border-l border-cyan-300/20 pl-3"><ChevronRight className="h-4 w-4 text-cyan-300" /><div className="min-w-0 flex-1"><p className="text-sm capitalize text-slate-200">{result.intent.category}</p><p className="truncate text-xs text-slate-500">{result.decision.recommendedAgent} · {result.decision.recommendedAction}</p></div><PriorityIndicator priority={result.decision.priority} /></div>)}</div></section> }

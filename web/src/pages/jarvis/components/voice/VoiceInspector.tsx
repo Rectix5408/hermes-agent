@@ -1,0 +1,4 @@
+import { Activity, AudioLines, Cpu } from 'lucide-react'
+import type { VoiceEvent } from './voice-data'
+export function VoiceInspector({ events }: { events: VoiceEvent[] }) { return <section className="border border-white/10 bg-slate-950/80 p-5"><p className="text-xs uppercase tracking-[0.18em] text-slate-500">Voice Inspector</p><div className="mt-4 space-y-3">{events.map(event => <div key={`${event.type}-${event.timestamp}`} className="flex gap-3"><EventIcon type={event.type} /><div><p className="text-sm text-slate-200">{event.message}</p><p className="text-xs text-slate-500">{event.type}</p></div></div>)}</div></section> }
+function EventIcon({ type }: { type: VoiceEvent['type'] }) { const Icon = type.startsWith('VOICE') ? AudioLines : type.startsWith('TASK') ? Activity : Cpu; return <Icon className="mt-0.5 h-4 w-4 text-cyan-300" /> }

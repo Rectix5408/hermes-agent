@@ -1,0 +1,3 @@
+import type { JarvisRuntimeEvent } from '../runtime/event-types'
+import type { JarvisIntent } from './types'
+export function automationSuggestion(intent: JarvisIntent, event: JarvisRuntimeEvent): string | undefined { const type = event.type.toUpperCase(); if (type.includes('EMAIL') || intent.category === 'communication') return 'Vorschlag: Aufgabe für E-Mail-Entwurf vorbereiten'; if (type.includes('CALENDAR') || intent.category === 'productivity') return 'Vorschlag: Eintrag zum Morgenbriefing hinzufügen'; if (event.source === 'task') return 'Vorschlag: Agenten-Workflow zur Prüfung vorbereiten'; return undefined }

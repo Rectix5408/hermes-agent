@@ -1,0 +1,4 @@
+import { Bot, UserRound } from 'lucide-react'
+import type { VoiceRuntimeState } from './voice-data'
+export function VoiceConversation({ state }: { state: VoiceRuntimeState }) { return <section className="border border-white/10 bg-slate-950/80 p-5"><p className="text-xs uppercase tracking-[0.18em] text-slate-500">Conversation</p><div className="mt-4 space-y-4">{state.currentInput && <Line icon={UserRound} label="You" text={state.currentInput} tone="text-slate-200" />}{state.currentResponse && <Line icon={Bot} label="Jarvis" text={state.currentResponse} tone="text-cyan-100" />}</div></section> }
+function Line({ icon: Icon, label, text, tone }: { icon: typeof Bot; label: string; text: string; tone: string }) { return <div className="flex gap-3"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" /><div><p className="text-xs uppercase tracking-[0.12em] text-slate-500">{label}</p><p className={`mt-1 text-sm ${tone}`}>{text}</p></div></div> }

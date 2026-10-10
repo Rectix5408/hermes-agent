@@ -1,0 +1,5 @@
+import type { JarvisRuntimeEvent } from '../runtime/event-types'
+import { priorityFor } from './priority-engine'
+import type { JarvisDecision, JarvisIntent } from './types'
+const choices: Record<JarvisIntent['category'], { agent: string; action: string; approval: boolean }> = { productivity: { agent: 'Calendar Agent', action: 'prepare reminder or briefing item', approval: false }, communication: { agent: 'Email Agent', action: 'prepare response', approval: true }, research: { agent: 'Research Agent', action: 'collect relevant information', approval: false }, coding: { agent: 'Coding Agent', action: 'prepare code analysis', approval: false }, automation: { agent: 'Task Planner', action: 'prepare execution plan', approval: false }, personal: { agent: 'Memory Agent', action: 'prepare contextual summary', approval: false } }
+export function decide(intent: JarvisIntent, event: JarvisRuntimeEvent): JarvisDecision { const choice = choices[intent.category]; return { intentId: intent.id, priority: priorityFor(intent, event), recommendedAgent: choice.agent, recommendedAction: choice.action, requiresApproval: choice.approval } }

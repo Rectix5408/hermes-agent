@@ -1,0 +1,10 @@
+import { useState } from 'react'
+import { BrainCircuit } from 'lucide-react'
+import { useRuntimeEvents } from '../../runtime/event-store'
+import { CoreStatus } from './CoreStatus'
+import { DataFlowParticles } from './DataFlowParticles'
+import { HologramBrain } from './HologramBrain'
+import { NeuralNetwork } from './NeuralNetwork'
+import { SystemOrbit } from './SystemOrbit'
+import { VisualControls, type VisualMode } from './VisualControls'
+export function JarvisCore() { const [mode, setMode] = useState<VisualMode>('focus'); const events = useRuntimeEvents(); const latest = events[0]; const active = events.some(event => event.status === 'running' || event.status === 'started'); return <section className="relative overflow-hidden border border-cyan-300/25 bg-slate-950/90 p-5 shadow-[0_0_90px_-44px_rgba(34,211,238,.7)]"><div className="absolute inset-0 bg-[linear-gradient(120deg,rgba(8,145,178,.12),transparent_35%,rgba(139,92,246,.08))]" /><DataFlowParticles active={active} /><div className="relative flex flex-wrap items-end justify-between gap-4"><div><p className="flex items-center gap-2 text-xs uppercase tracking-[.24em] text-cyan-300/80"><BrainCircuit className="h-4 w-4" /> Jarvis Visual Core</p><h2 className="mt-1 text-2xl font-medium text-slate-100">Holographic Intelligence Center</h2><p className="mt-1 text-sm text-slate-500">{latest ? `${latest.source} · ${latest.type.replaceAll('_', ' ')}` : 'System online'}</p></div><VisualControls mode={mode} onChange={setMode} /></div><div className="relative mt-5 grid items-center gap-5 lg:grid-cols-3">{mode !== 'system' && <HologramBrain active={active} />}{mode !== 'minimal' && <NeuralNetwork event={latest} />}{mode !== 'neural' && <SystemOrbit active={active} />}</div><div className="relative mt-5"><CoreStatus eventCount={events.length} /></div></section> }
