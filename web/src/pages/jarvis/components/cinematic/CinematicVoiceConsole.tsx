@@ -118,7 +118,7 @@ export function CinematicVoiceConsole({ status, voiceBusy, voiceState, history, 
   return <section id="jarvis-voice-cinematic" className="jarvis-glass relative overflow-hidden p-5">
     <div className="jarvis-scanline" />
     <div className="relative grid items-center gap-5 lg:grid-cols-[minmax(18rem,.8fr)_minmax(0,1fr)_minmax(18rem,.7fr)]">
-      <div className="text-center">
+      <div className="jarvis-voice-reactor text-center">
         <AudioHologram state={liveState} />
         <p className="mt-4 text-xs uppercase tracking-[.22em] text-cyan-300/80">Voice Intelligence</p>
         <p className="mt-1 text-xl text-slate-100">{liveState === 'processing' ? 'PROCESSING' : liveState.toUpperCase()}</p>
@@ -136,7 +136,7 @@ export function CinematicVoiceConsole({ status, voiceBusy, voiceState, history, 
         </div>
         {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
       </div>
-      <div className="border border-white/10 bg-black/20 p-4">
+      <div className="jarvis-voice-settings border border-cyan-300/15 bg-black/20 p-4">
         <p className="text-xs uppercase tracking-[.16em] text-slate-500">Voice settings</p>
         <label className="mt-3 block text-xs text-slate-400">STT Engine<select value={settings.sttEngine} onChange={event => updateSettings({ sttEngine: event.target.value as VoiceSettings['sttEngine'] })} className="mt-1 block w-full border border-white/10 bg-slate-950 p-2 text-sm text-slate-100"><option value="whisper-local">Whisper Local</option><option value="browser-speech">Browser Speech</option><option value="disabled">Disabled</option></select></label>
         <Setting label="Local Whisper Model" value={sttRuntimeStatus} />
