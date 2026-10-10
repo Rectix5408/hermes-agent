@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from agent.i18n import t
 from agent.interrupt_compat import _accepts_keyword
 from agent.replay_cleanup import canonicalize_replay_history
+from gateway.capability_session import initial_capability_profile, initial_context_budget
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
@@ -29,10 +30,8 @@ from gateway.platforms.base_exec_approval import ea_default_reason_text
 from gateway.turn_context import TurnContext
 from hermes_cli.config import cfg_get
 from utils import is_truthy_value
-
 if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
     from gateway.run import GatewayRunner
-
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
@@ -47,8 +46,6 @@ _CARD_DESTINATION_REFUSALS = {
     "slack task_card requires a thread anchor",
     "slack task_card requires a thread anchor (Slack streams are thread replies)",
 }
-
-
 def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
     """True when the adapter class renders native approval buttons. BasePlatformAdapter subclasses
     say so through ``supports_exec_approval_buttons``; anything else (test doubles, relay-style
@@ -57,7 +54,6 @@ def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
     if callable(probe) and issubclass(adapter_cls, BasePlatformAdapter):
         return bool(probe())
     return getattr(adapter_cls, "send_exec_approval", None) is not None
-
 
 # Rendered on a native clarify card whose wait ended without a click (mirrors the notice the
 # Slack click handler shows on a dead entry).
@@ -1112,6 +1108,7 @@ class TurnRunner:
         ctx = self._ctx
         runner = self._runner
         src = ctx.source
+        capability_profile = initial_capability_profile(ctx)
         return ctx.AIAgent(
             model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),
             max_iterations=max_iterations, quiet_mode=True, verbose_logging=False,
@@ -1132,6 +1129,8 @@ class TurnRunner:
             # See #60955.
             fallback_model=self._runner._refresh_fallback_model(),
             skip_context_files=skip_context_files,
+            capability_profile=capability_profile,
+            context_budget=initial_context_budget(ctx, capability_profile),
             # Keep the persona even with minimal context: soul identity is one small file.
             load_soul_identity=True,
         )

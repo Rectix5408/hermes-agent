@@ -550,10 +550,19 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
                 turn_route = cli._resolve_turn_agent_config(effective_query)
                 if turn_route["signature"] != cli._active_agent_route_signature:
                     cli.agent = None
+                capability_profile = None
+                context_budget = None
+                if cli.agent is None and isinstance(effective_query, str):
+                    from agent.capability_profiles import resolve_capabilities_for_request
+                    from agent.context_budget import resolve_workspace_context_for_request
+                    capability_profile = resolve_capabilities_for_request(effective_query)
+                    context_budget = resolve_workspace_context_for_request(effective_query, capability_profile)
                 if cli._init_agent(
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],
                     request_overrides=turn_route.get("request_overrides"),
+                    capability_profile=capability_profile,
+                    context_budget=context_budget,
                 ):
                     _configure_quiet_agent(cli.agent)
                     if emitter is not None:

@@ -271,14 +271,15 @@ def _profile_name_for_home(home: Path) -> str:
         return "default"
 
 
-def _tool_guidance_block(agent: Any) -> Optional[str]:
+def _tool_guidance_block(agent: Any, manifest=None) -> Optional[str]:
     """Tool-aware behavioral guidance, injected only when the tools are loaded."""
     names = agent.valid_tool_names
     # With both memory stores disabled no store is built, so the full guidance
     # would steer the model at a tool that always answers "Memory is not
     # available"; with only USER.md enabled the narrower block is used.
+    allows = lambda module: manifest is None or manifest.includes(module)
     memory_guidance = None
-    if "memory" in names:
+    if allows("memory") and "memory" in names:
         memory_guidance = _pb.build_memory_guidance(
             getattr(agent, "_memory_enabled", True),
             getattr(agent, "_user_profile_enabled", True),
@@ -287,13 +288,13 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
     # Kanban lifecycle: resolved once at __init__ (_kanban_worker_guidance);
     # fallback paths must also limit task protocol guidance to dispatcher workers.
     _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
-    if _kanban_guidance is None and "kanban_show" in names and owned_kanban_task():
+    if allows("automation") and _kanban_guidance is None and "kanban_show" in names and owned_kanban_task():
         _kanban_guidance = KANBAN_GUIDANCE
     tool_guidance = [
         memory_guidance,
-        SESSION_SEARCH_GUIDANCE if "session_search" in names else None,
-        SKILLS_GUIDANCE if "skill_manage" in names else None,
-        _kanban_guidance,
+        SESSION_SEARCH_GUIDANCE if allows("memory") and "session_search" in names else None,
+        SKILLS_GUIDANCE if allows("agent") and "skill_manage" in names else None,
+        _kanban_guidance if allows("automation") else None,
     ]
     return " ".join(g for g in tool_guidance if g) or None
 
@@ -550,35 +551,37 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> tuple[list[str], bool
     return ([_soul_content], True) if _soul_content else ([DEFAULT_AGENT_IDENTITY], False)
 
 
-def _guidance_parts(agent: Any) -> list[str]:
+def _guidance_parts(agent: Any, manifest=None) -> list[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
     parts: list[str] = []
-    if agent.valid_tool_names:
+    allows = lambda module: manifest is None or manifest.includes(module)
+    if agent.valid_tool_names and allows("completion"):
         parts += [
-            text for flag, text in (
-                ("_task_completion_guidance", TASK_COMPLETION_GUIDANCE),
-                ("_parallel_tool_call_guidance", PARALLEL_TOOL_CALL_GUIDANCE),
-            ) if getattr(agent, flag, True)
+            text for module, flag, text in (
+                ("completion", "_task_completion_guidance", TASK_COMPLETION_GUIDANCE),
+                ("parallel", "_parallel_tool_call_guidance", PARALLEL_TOOL_CALL_GUIDANCE),
+            ) if allows(module) and getattr(agent, flag, True)
         ]
-    parts.append(_tool_guidance_block(agent))  # None/empty entries are dropped by _join_tier
+    parts.append(_tool_guidance_block(agent, manifest))  # None/empty entries are dropped by _join_tier
     if not agent.valid_tool_names:
         return parts
     # Steering only lands inside tool results, so only reachable with tools.
-    parts.append(STEER_CHANNEL_NOTE)
+    if allows("steering"):
+        parts.append(STEER_CHANNEL_NOTE)
     # agent.tool_use_enforcement / agent.execution_guidance: "auto" (default)
     # matches the hardcoded model lists; true/false force; a list gives custom
     # model-name substrings.  Execution guidance is an independent gate so
     # DeepSeek/Kimi/Qwen-class models get it even with enforcement off.
-    if _model_gate(agent._tool_use_enforcement, agent.model, TOOL_USE_ENFORCEMENT_MODELS):
+    if allows("tool_use") and _model_gate(agent._tool_use_enforcement, agent.model, TOOL_USE_ENFORCEMENT_MODELS):
         parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
         if any(g in (agent.model or "").lower() for g in ("gemini", "gemma")):
             parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
-    if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
+    if allows("model_execution") and _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
         from agent.prompt_builder import execution_guidance_text
         parts.append(execution_guidance_text(agent.valid_tool_names))
     # delegate_task background delivery is intentionally between turns. Put this after the generic persistence
     # blocks so their "keep working" rule cannot turn the required yield into no-op/polling activity.
-    if "delegate_task" in agent.valid_tool_names:
+    if allows("delegation") and "delegate_task" in agent.valid_tool_names:
         parts.append(ASYNC_HANDOFF_GUIDANCE)
     return parts
 
@@ -717,7 +720,8 @@ def _context_files_part(agent: Any, ctx_len: Optional[int], soul_loaded: bool) -
     IS the user's shell cwd. Desktop launch artifacts skip the session cwd but
     still honor the profile-scoped TERMINAL_CWD; without one, the fallback guard
     can reject Hermes's bundled AGENTS.md."""
-    if agent.skip_context_files:
+    decision = getattr(agent, "_workspace_context_decision", None)
+    if agent.skip_context_files or (decision is not None and not decision.load_workspace_context):
         return []
     launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
     cwd = resolve_context_cwd(include_session_override=not launch_artifact)
@@ -743,13 +747,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _cc_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
     _ctx_len = _cc_len if isinstance(_cc_len, int) and _cc_len > 0 else None
     # ── Stable tier ────────────────────────────────────────────────
+    manifest = getattr(agent, "_stable_prompt_manifest", None)
     stable_parts, _soul_loaded = _identity_parts(agent, _ctx_len)
     # The skill_view() pointer dangles without skill tools OR without the
     # hermes-agent skill installed, so the variant is chosen after the skills
     # index is built; this slot holds its position.
     _help_guidance_slot = len(stable_parts)
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
-    stable_parts.extend(_guidance_parts(agent))
+    stable_parts.extend(_guidance_parts(agent, manifest))
     skills_prompt = _skills_prompt(agent)
     # Skill-pointer variant requires BOTH skill_view AND the hermes-agent skill
     # in the rendered index (pure string check — inherits the index's stability).
@@ -757,12 +762,15 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         stable_parts[_help_guidance_slot] = HERMES_AGENT_HELP_GUIDANCE
     stable_parts.extend(_alibaba_identity_part(agent))
     # Pinned skills are per-agent constants (resolved once), so they live in the stable prefix.
-    stable_parts.extend(_auto_load_parts(agent))
+    if manifest is None or manifest.includes("agent"):
+        stable_parts.extend(_auto_load_parts(agent))
     # Coding posture: the operating brief stays in the stable prefix. The
     # environment block contains the current cwd/backend and belongs after
     # project context, not ahead of a large shared AGENTS.md block.
     environment_hints = _pb.build_environment_hints()
-    coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = _coding_parts(agent)
+    coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = (
+        _coding_parts(agent) if manifest is None or manifest.includes("coding") else ([], [], [])
+    )
     stable_parts.extend(coding_prefix_parts)
     post_workspace_parts = _post_workspace_parts(agent)
     # ── Context tier (project/worktree-dependent, may change between sessions) ──
@@ -803,10 +811,13 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     volatile so implicit longest-prefix caches keep the unchanged scaffold."""
     parts = build_system_prompt_parts(agent, system_message=system_message)
     agent._cached_system_prompt_static = parts["stable"]
+    prompt = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    from agent.capability_profiles import record_capability_prompt_estimate
+    record_capability_prompt_estimate(agent, prompt, stable_prompt=parts["stable"])
     # Surface context-file truncation warnings in chat, not only in logs.
     for warning in drain_truncation_warnings():
         agent._emit_diagnostic_status(warning)
-    return "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    return prompt
 
 
 def invalidate_system_prompt(agent: Any) -> None:

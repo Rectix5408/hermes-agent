@@ -598,6 +598,11 @@ def finalize_turn(
         and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
     )
 
+    # This outcome is metadata only. The request text is never stored and the cached
+    # system prompt/runtime route remain untouched for the whole conversation.
+    from agent.adaptive_routing import complete_adaptive_turn
+    complete_adaptive_turn(agent, success=completed)
+
     _rollback_interrupted_preflight_display(agent, interrupted)
 
     from hermes_cli.observability.shared_metrics_harness import finish_turn

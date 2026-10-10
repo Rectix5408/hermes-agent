@@ -23,6 +23,9 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
+from agent.capability_profiles import apply_requested_capability_profile
+from agent.context_budget import apply_context_budget
+from agent.prompt_manifest import freeze_stable_prompt_manifest
 from agent.agent_init_fallback import _fallback_entries, _init_fallback_chain, recompute_init_fallback_api_mode
 from agent.agent_runtime_helpers import _ra
 from agent.agent_init_validation import positive_int
@@ -48,7 +51,6 @@ from utils import base_url_host_matches, is_truthy_value
 
 # Same logger name as run_agent so caplog/patches on "run_agent" see our records.
 logger = logging.getLogger("run_agent")
-
 
 # Deduped: the gateway builds a fresh AIAgent per message, so it would warn every turn.
 _warned_unavailable_providers: set[tuple[str, str]] = set()
@@ -2036,7 +2038,6 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
     agent.max_compression_attempts = cs.max_attempts
     agent.compression_idle_compact_after_seconds = cs.idle_compact_after_seconds
 
-
 def _enforce_minimum_context(agent):
     # Reject windows below the 64K floor needed for reliable tool-calling; an explicit
     # positive model.context_length on LM Studio is allowed below the floor.
@@ -2296,7 +2297,6 @@ def _init_usage_state(agent):
         working_dir=working_dir, enabled=not agent.skip_context_files)
     _set_defaults(agent, _USAGE_STATE)
 
-
 # Per-session usage accounting.
 _USAGE_STATE: dict[str, Any] = {
     "_user_turn_count": 0,
@@ -2402,7 +2402,6 @@ def init_agent(
     for _name in _GATEWAY_IDENTITY_PARAMS:
         setattr(agent, f"_{_name}", _params[_name])
     agent.session_cwd = cwd or None
-    # Shared iteration budget: parent creates, children inherit.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)
     # CLI replaces this with _cprint so raw ANSI status lines go through prompt_toolkit's
     # renderer (StdoutProxy would mangle them). None = builtins.print.
@@ -2453,7 +2452,8 @@ def init_agent(
     # Models whose Anthropic organization answered a fast request with a fast-mode limit of 0;
     # agent.fast_mode stops sending ``speed`` to them for the rest of the session.
     agent._fast_mode_unavailable_models = set()
-
+    enabled_toolsets, skip_memory = apply_requested_capability_profile(agent, enabled_toolsets, skip_memory)
+    apply_context_budget(agent, getattr(agent, "_requested_context_budget", None))
     _init_prompt_cache_config(agent)
     _init_turn_state(agent, run_budget_seconds)
     _setup_logging(agent)
@@ -2476,6 +2476,7 @@ def init_agent(
     _apply_display_config(agent, _agent_cfg, platform)
     _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
     _apply_agent_section(agent, _agent_cfg)
+    freeze_stable_prompt_manifest(agent)
     _configure_jarvis_execution(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(
@@ -2490,6 +2491,5 @@ def init_agent(
     _clamp_compressor_to_ollama_num_ctx(agent)
     _emit_compression_summary(agent, cs)
     _snapshot_primary_runtime(agent)
-
 
 __all__ = ["init_agent"]

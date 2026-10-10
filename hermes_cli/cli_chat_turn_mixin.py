@@ -71,10 +71,18 @@ class CLIChatTurnMixin:
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:
             _retire_agent(self)
+        capability_profile = None
+        context_budget = None
+        if self.agent is None and not self.conversation_history and isinstance(message, str):
+            from agent.capability_profiles import resolve_capabilities_for_request
+            from agent.context_budget import resolve_workspace_context_for_request
+            capability_profile = resolve_capabilities_for_request(message)
+            context_budget = resolve_workspace_context_for_request(message, capability_profile)
         if self.agent is None:
             _cprint(f"{_DIM}{t('cli.chat.initializing_agent')}{_RST}")
         if not self._init_agent(model_override=turn_route["model"], runtime_override=turn_route["runtime"],
-                                request_overrides=turn_route.get("request_overrides")):
+                                request_overrides=turn_route.get("request_overrides"),
+                                capability_profile=capability_profile, context_budget=context_budget):
             return None
         agent = self.agent
         if agent is None:

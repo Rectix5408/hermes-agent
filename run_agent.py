@@ -241,6 +241,7 @@ class AIAgent(
         max_iterations: int = sys.maxsize,  # unlimited tool-calling iterations by default (shared with subagents)
         tool_delay: float | None = None,  # deprecated: accepted for compatibility, ignored
         enabled_toolsets: list[str] | None = None, disabled_toolsets: list[str] | None = None,
+        capability_profile=None, context_budget=None,
         save_trajectories: bool = False, verbose_logging: bool = False, quiet_mode: bool = False,
         tool_progress_mode: str = "all", ephemeral_system_prompt: str | None = None,
         log_prefix_chars: int = 100, log_prefix: str = "",
@@ -278,7 +279,11 @@ class AIAgent(
         tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent`` (same keyword parameters, minus ``tool_delay``)."""
-        init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay")}
+        if capability_profile is not None:
+            self._requested_capability_profile = capability_profile
+        if context_budget is not None:
+            self._requested_context_budget = context_budget
+        init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "tool_delay", "capability_profile", "context_budget")}
         if tool_delay is not None:
             warnings.warn("tool_delay is deprecated and ignored; sequential tool calls "
                           "no longer sleep between executions.", DeprecationWarning, stacklevel=2)

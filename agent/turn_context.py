@@ -1139,6 +1139,12 @@ def build_turn_context(
         logger.debug("message_agent injection skipped", exc_info=True)
 
     _ensure_session_row(agent, pending_cli_message)
+    from agent.capability_profiles import persist_capability_metadata
+    persist_capability_metadata(agent)
+    # Classification is metadata-only and happens after the session row exists.  It never
+    # changes this conversation's model, toolset, cached system prompt, or memory behavior.
+    from agent.adaptive_routing import begin_adaptive_turn
+    begin_adaptive_turn(agent, original_user_message)
 
     # A turn interrupted before admission could not write its accepted input because
     # it did not own the session lease. Persist that carried-forward row now, before
