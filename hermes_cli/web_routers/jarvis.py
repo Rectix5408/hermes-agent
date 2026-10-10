@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import logging
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -177,6 +178,7 @@ def _jarvis_cron_jobs(profile: Optional[str]) -> list[dict[str, Any]]:
 
         jobs = _list_cron_jobs_sync(profile or "all")
     except Exception:
+        logging.exception("Jarvis cron status is unavailable")
         return []
     filtered = []
     for job in jobs:
@@ -196,6 +198,7 @@ def _model_inventory(profile: Optional[str]) -> dict[str, Any]:
             payload = build_model_options_payload(
                 load_picker_context(), include_unconfigured=True, explicit_only=False, refresh=False)
     except Exception as exc:
+        logging.exception("Jarvis model inventory is unavailable")
         return {
             "available": False,
             "error": str(exc),
@@ -248,7 +251,7 @@ def _load_approvals() -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return []
     return data if isinstance(data, list) else []
@@ -334,7 +337,7 @@ def _recent_runs(limit: int = 20) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     rows = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(1, limit):]:
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[-max(1, limit):]:
         try:
             rows.append(json.loads(line))
         except json.JSONDecodeError:
@@ -402,6 +405,7 @@ def _run_open_tasks_agent(request: str, limit: int) -> dict[str, Any]:
         turn = agent.run_conversation(prompt, task_id="jarvis-open-tasks")
         raw_result = _latest_tool_result(turn, "kanban_list")
     except Exception:
+        logging.exception("Jarvis open-tasks agent loop failed")
         receipt = {"tool": "kanban_list", "status": "failed", "created_at": time(), "error": "Agent loop failed."}
         _persist_execution_receipt(receipt)
         return {"ok": False, "receipt": receipt, "result": None, "response": None}
@@ -432,6 +436,7 @@ def _status_sync(profile: Optional[str]) -> dict[str, Any]:
         agents = _agent_catalog(module)
         schema = module.SCHEMA_VERSION
     except Exception as exc:
+        logging.exception("Jarvis orchestrator is unavailable")
         orchestrator_available = False
         agents = []
         schema = ""

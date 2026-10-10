@@ -519,6 +519,25 @@ def apply_llm_output_transform(
     return final_response, transformed, pre_transform
 
 
+def _is_pending_tool_stop(agent, final_response, interrupted, messages) -> bool:
+    """Whether a non-interrupted tool tail lacks a visible assistant response."""
+    return (
+        not final_response
+        and not interrupted
+        and bool(messages)
+        and isinstance(messages[-1], dict)
+        and messages[-1].get("role") == "tool"
+        and not (getattr(agent, "_current_streamed_assistant_text", "") or "").strip()
+    )
+
+
+def _exit_failure_marks_turn_failed(exit_failure, failed: bool) -> bool:
+    """Apply an exit verdict without changing advisory completion states."""
+    if exit_failure is not None and exit_failure.fails_turn:
+        return True
+    return failed
+
+
 def finalize_turn(
     agent, *, final_response, api_call_count, interrupted, failed, messages, conversation_history,
     effective_task_id, turn_id, user_message, original_user_message, _should_review_memory,
@@ -546,14 +565,7 @@ def finalize_turn(
     # exit reason, fail the turn, and synthesize the visible close so the tail close in
     # ``_persist_step`` persists an assistant row. A turn that already streamed text is
     # left alone: ``_recover_final_from_stream`` owns that recovery (#95514).
-    if (
-        not final_response
-        and not interrupted
-        and messages
-        and isinstance(messages[-1], dict)
-        and messages[-1].get("role") == "tool"
-        and not (getattr(agent, "_current_streamed_assistant_text", "") or "").strip()
-    ):
+    if _is_pending_tool_stop(agent, final_response, interrupted, messages):
         _turn_exit_reason = "pending_tool_result"
         failed = True
         final_response = ""
@@ -564,21 +576,18 @@ def finalize_turn(
                 )
         except Exception:
             final_response = ""
-        if not final_response:
-            # The turn-completion explainer opt-out must not reintroduce the silent stop.
-            final_response = (
-                "No reply: the turn stopped while a tool result was still pending. "
-                "Send `continue` to let the model summarize."
-            )
-
+        # The turn-completion explainer opt-out must not reintroduce the silent stop.
+        final_response = final_response or (
+            "No reply: the turn stopped while a tool result was still pending. "
+            "Send `continue` to let the model summarize."
+        )
     # Loop exits that are failures in their own right (outer-loop error cap, shutdown, context
     # that could not be shrunk) carry the verdict the UI descriptor needs; a bare
     # ``turn_exit_reason`` collapsed to code="unknown", retryable=True on every surface.
     # Advisory verdicts (``fails_turn=False``) only add the code: ``failed``/``completed`` keep
     # the loop's values so cron, kanban and transcript persistence behave as before.
     _exit_failure = None if interrupted else exit_reason_failure(_turn_exit_reason)
-    if _exit_failure is not None and _exit_failure.fails_turn:
-        failed = True
+    failed = _exit_failure_marks_turn_failed(_exit_failure, failed)
 
     # Sibling producers (``turn_recovery``, ``codex_runtime``) return ``completed=False`` for an
     # interrupted turn; the gateway stream gate and the API run status rely on that contract.
@@ -723,7 +732,7 @@ def finalize_turn(
         if briefing is not None:
             result["verified_daily_briefing"] = briefing
     except Exception:
-        logger.debug("Jarvis verified daily briefing assembly failed", exc_info=True)
+        logging.exception("Jarvis verified daily briefing assembly failed")
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # Persistence failures already set failed=True; also stamp `error` so the gateway

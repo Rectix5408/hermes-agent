@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 from agent.context_compressor import ContextCompressor
 from agent.agent_init_fallback import _fallback_entries, _init_fallback_chain, recompute_init_fallback_api_mode
 from agent.agent_runtime_helpers import _ra
+from agent.agent_init_validation import positive_int
 from agent.iteration_budget import IterationBudget, normalize_budget_warning_ratio
 from agent.memory_manager import StreamingContextScrubber
 from agent.memory_provider import is_core_memory_provider
@@ -1453,17 +1454,6 @@ def _configure_jarvis_execution(agent, config: dict[str, Any]) -> None:
     agent._jarvis_execution_receipts: list[dict[str, Any]] = []
 
 
-def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:
-    """``int(raw)`` when positive, else None. ``reject`` lists types refused outright (bool, float)."""
-    if reject and isinstance(raw, reject):
-        return None
-    try:
-        parsed = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
 def _compression_threshold(agent, cfg: dict[str, Any]) -> tuple[float, bool]:
     """Global threshold merged with the per-model override; stashes the autoraise notice.
     Codex gpt-5.4/5.5 raise to 85% (272K cap → 50% would compact at ~136K); the opt-out flag
@@ -1511,7 +1501,7 @@ def _compression_codex_settings(cfg: dict[str, Any]) -> tuple[str, bool, Optiona
     _raw = cfg.get("codex_responses_compact_threshold")
     compact_threshold = None
     if _raw is not None:
-        compact_threshold = _positive_int(_raw, reject=(bool, float))
+        compact_threshold = positive_int(_raw, reject=(bool, float))
         if compact_threshold is None:
             _ra().logger.warning(
                 "Invalid compression.codex_responses_compact_threshold=%r; "
@@ -1537,7 +1527,7 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     # apply-time. Explicit null is the ratio-only opt-out and stays None.
     threshold_tokens = cfg.get("threshold_tokens", cfg_get(DEFAULT_CONFIG, "compression", "threshold_tokens"))
     if threshold_tokens is not None:
-        threshold_tokens = _positive_int(threshold_tokens)
+        threshold_tokens = positive_int(threshold_tokens)
     # Non-system head messages to protect (system prompt is always protected); 0 is a
     # legitimate "system prompt + summary + tail".
     protect_first = max(0, int(cfg.get("protect_first_n", 3)))
@@ -1816,7 +1806,7 @@ def _warn_invalid_custom_provider_context_length(agent, _custom_providers) -> No
         _cp_models = _cp_entry.get("models", {})
         _cp_model_cfg = _cp_models.get(agent.model, {}) if isinstance(_cp_models, dict) else None
         _cp_ctx = _cp_model_cfg.get("context_length") if isinstance(_cp_model_cfg, dict) else None
-        if _cp_ctx is not None and _positive_int(_cp_ctx) is None:
+        if _cp_ctx is not None and positive_int(_cp_ctx) is None:
             _warn_invalid_config_int(
                 f"context_length for model {agent.model!r} in custom_providers",
                 _cp_ctx, _CTX_LEN_REQUIREMENT, "auto-detection", "auto-detected context window",

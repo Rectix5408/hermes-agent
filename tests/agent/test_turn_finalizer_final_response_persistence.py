@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from agent.turn_finalizer import finalize_turn
 
 
@@ -79,6 +81,70 @@ class FakeAgent:
 
     def _sync_external_memory_for_turn(self, **_kwargs):
         pass
+
+
+def _finalize_with_briefing(agent):
+    return finalize_turn(
+        agent,
+        final_response="Done.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=[
+            {"role": "user", "content": "do it"},
+            {"role": "assistant", "content": "Done."},
+        ],
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="do it",
+        original_user_message="do it",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(stop)",
+    )
+
+
+def test_finalizer_attaches_valid_verified_daily_briefing(monkeypatch):
+    from agent import jarvis_execution
+
+    briefing = {"sources": {"calendar": "verified", "tasks": "verified"}, "text": "Tagesübersicht"}
+    monkeypatch.setattr(jarvis_execution, "verified_daily_briefing", lambda _agent: briefing)
+
+    result = _finalize_with_briefing(FakeAgent())
+
+    assert result["final_response"] == "Done."
+    assert result["verified_daily_briefing"] == briefing
+
+
+@pytest.mark.parametrize("briefing", [None, {"sources": {"calendar": "verified"}, "text": "Invalid"}])
+def test_finalizer_does_not_change_response_for_missing_or_invalid_daily_briefing(monkeypatch, briefing):
+    from agent import jarvis_execution
+
+    monkeypatch.setattr(jarvis_execution, "verified_daily_briefing", lambda _agent: briefing)
+
+    result = _finalize_with_briefing(FakeAgent())
+
+    assert result["final_response"] == "Done."
+    assert result.get("verified_daily_briefing") == briefing
+
+
+@pytest.mark.parametrize("error", [KeyError("calendar"), RuntimeError("unexpected")])
+def test_finalizer_logs_briefing_hook_errors_without_replacing_response(monkeypatch, caplog, error):
+    from agent import jarvis_execution
+
+    def _raise(_agent):
+        raise error
+
+    monkeypatch.setattr(jarvis_execution, "verified_daily_briefing", _raise)
+
+    result = _finalize_with_briefing(FakeAgent())
+
+    assert result["final_response"] == "Done."
+    assert "verified_daily_briefing" not in result
+    assert any(
+        record.getMessage() == "Jarvis verified daily briefing assembly failed" and record.exc_info
+        for record in caplog.records
+    )
 
 
 

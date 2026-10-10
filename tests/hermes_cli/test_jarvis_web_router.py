@@ -124,6 +124,47 @@ def test_status_reports_real_availability_without_external_calls(monkeypatch):
     assert status["automations"]["activation_policy"] == "manual_approval_required"
 
 
+def test_jarvis_cron_jobs_filters_the_requested_profile(monkeypatch):
+    from hermes_cli.web_routers import cron
+
+    requested_profiles = []
+    monkeypatch.setattr(
+        cron,
+        "_list_cron_jobs_sync",
+        lambda profile: requested_profiles.append(profile) or [
+            {"id": "jarvis", "skills": ["jarvis-assistant"]},
+            {"id": "other", "skills": ["other-skill"]},
+        ],
+    )
+
+    assert jarvis._jarvis_cron_jobs("work") == [{"id": "jarvis", "skills": ["jarvis-assistant"]}]
+    assert requested_profiles == ["work"]
+
+
+def test_jarvis_cron_jobs_preserves_empty_scheduler_result(monkeypatch):
+    from hermes_cli.web_routers import cron
+
+    monkeypatch.setattr(cron, "_list_cron_jobs_sync", lambda _profile: [])
+
+    assert jarvis._jarvis_cron_jobs("default") == []
+
+
+@pytest.mark.parametrize("failure", [OSError("scheduler unavailable"), RuntimeError("unexpected scheduler failure")])
+def test_jarvis_cron_jobs_logs_failures_and_keeps_dashboard_fallback(monkeypatch, caplog, failure):
+    from hermes_cli.web_routers import cron
+
+    def _raise(_profile):
+        raise failure
+
+    monkeypatch.setattr(cron, "_list_cron_jobs_sync", _raise)
+
+    assert jarvis._jarvis_cron_jobs("work") == []
+    assert any(
+        record.getMessage() == "Jarvis cron status is unavailable" and record.exc_info
+        for record in caplog.records
+    )
+
+
 def test_model_inventory_splits_local_and_cloud_rows(monkeypatch):
     monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
     monkeypatch.setattr(jarvis, "load_picker_context", None, raising=False)
@@ -144,6 +185,46 @@ def test_model_inventory_splits_local_and_cloud_rows(monkeypatch):
     assert result["available"] is True
     assert result["local"][0]["provider"] == "llamacpp"
     assert result["cloud"][0]["provider"] == "openai"
+
+
+def test_model_inventory_logs_failure_and_preserves_fallback(monkeypatch, caplog):
+    import hermes_cli.inventory as inventory
+
+    monkeypatch.setattr(inventory, "load_picker_context", lambda: {})
+    monkeypatch.setattr(
+        inventory,
+        "build_model_options_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("inventory unavailable")),
+    )
+
+    result = jarvis._model_inventory("work")
+
+    assert result["available"] is False
+    assert result["local"] == [] and result["cloud"] == []
+    assert any(
+        record.getMessage() == "Jarvis model inventory is unavailable" and record.exc_info
+        for record in caplog.records
+    )
+
+
+def test_status_logs_orchestrator_failure_and_preserves_schema(monkeypatch, caplog):
+    monkeypatch.setattr(jarvis, "_orchestrator_module", lambda: (_ for _ in ()).throw(RuntimeError("unavailable")))
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(jarvis, "load_config", lambda: {})
+    monkeypatch.setattr(jarvis, "load_env", lambda: {})
+    monkeypatch.setattr(jarvis, "_model_inventory", lambda _profile: {"available": False})
+    monkeypatch.setattr(jarvis, "_recent_runs", lambda: [])
+    monkeypatch.setattr(jarvis, "_jarvis_cron_jobs", lambda _profile: [])
+
+    status = jarvis._status_sync("work")
+
+    assert status["ok"] is True
+    assert status["orchestrator"]["available"] is False
+    assert status["agents"] == []
+    assert any(
+        record.getMessage() == "Jarvis orchestrator is unavailable" and record.exc_info
+        for record in caplog.records
+    )
 
 
 def test_persisted_run_records_are_compact_and_do_not_store_payloads(tmp_path, monkeypatch):
@@ -169,6 +250,21 @@ def test_persisted_run_records_are_compact_and_do_not_store_payloads(tmp_path, m
     assert rows[0]["agents"] == ["email"]
     assert "payload" not in rows[0]
     assert "must-not-be-written" not in (tmp_path / "jarvis" / "runs.jsonl").read_text(encoding="utf-8")
+
+
+def test_jarvis_storage_readers_accept_utf8_bom(tmp_path, monkeypatch):
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    store = tmp_path / "jarvis"
+    store.mkdir()
+    (store / "approvals.json").write_text(
+        '[{"id": "approval-1", "status": "pending"}]', encoding="utf-8-sig"
+    )
+    (store / "runs.jsonl").write_text(
+        '{"kind": "run", "status": "completed"}\n', encoding="utf-8-sig"
+    )
+
+    assert jarvis._load_approvals() == [{"id": "approval-1", "status": "pending"}]
+    assert jarvis._recent_runs() == [{"kind": "run", "status": "completed"}]
 
 
 def test_approval_queue_is_persistent_and_one_time_use(tmp_path, monkeypatch):
@@ -377,7 +473,7 @@ def test_open_tasks_marks_native_tool_errors_failed(tmp_path, monkeypatch):
     assert output["result"] == {"error": "board unavailable"}
 
 
-def test_open_tasks_marks_provider_failures_failed(tmp_path, monkeypatch):
+def test_open_tasks_marks_provider_failures_failed(tmp_path, monkeypatch, caplog):
     class FailingAgent:
         def run_conversation(self, *_args, **_kwargs):
             raise RuntimeError("provider unavailable")
@@ -391,6 +487,10 @@ def test_open_tasks_marks_provider_failures_failed(tmp_path, monkeypatch):
     assert output["ok"] is False
     assert output["receipt"]["error"] == "Agent loop failed."
     assert '"status": "completed"' not in (tmp_path / "jarvis" / "executions.jsonl").read_text(encoding="utf-8")
+    assert any(
+        record.getMessage() == "Jarvis open-tasks agent loop failed" and record.exc_info
+        for record in caplog.records
+    )
 
 
 def test_open_tasks_rejects_unrelated_requests():
