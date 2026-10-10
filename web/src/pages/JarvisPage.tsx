@@ -290,7 +290,7 @@ export default function JarvisPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 text-slate-100">
-      {toast && <Toast {...toast} />}
+      <Toast toast={toast} />
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <Metric icon={ShieldCheck} label="Hermes" value={status ? "bereit" : loading ? "lädt" : "Fehler"} tone={status ? "success" : "warning"} />

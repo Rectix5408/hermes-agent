@@ -1,6 +1,6 @@
 ---
 name: jarvis-assistant
-description: "German persona and morning briefing."
+description: "German assistant, briefing, and personal tasks."
 version: 0.1.0
 author: Rene, Hermes Agent
 license: MIT
@@ -131,11 +131,11 @@ Load this skill when the user asks for Jarvis or a German personal assistant. Fo
 
 | Request | Action |
 |---|---|
-| "Jarvis, was steht heute an?" | Load `references/morning-briefing.md`, then run read-only checks. |
+| "Jarvis, was steht heute an?" | Run the verified daily planning read workflow. |
 | "Bearbeite meine Inbox" | Load `email-inbox-triage` and `references/productivity-operations.md`; draft first. |
 | "Erstelle einen Instagram-Plan" | Run `scripts/jarvis_multi_agent.py` for `instagram`; publish only after approval. |
 | "Recherchiere und bereite eine Entscheidung vor" | Orchestrate `research` and `business`; pass only summaries and source links. |
-| "Plane meinen Tag" | Read calendar, tasks, reminders, and constraints; propose a plan before writes. |
+| "Plane meinen Tag" | Run the verified daily planning read workflow; propose a plan before writes. |
 | "Erinnere mich daran" | Prefer existing task/reminder source; schedule only after approval. |
 | "Merke dir, dass ..." | Apply `references/memory-policy.md`, then use `memory` only if allowed. |
 | "Sprich mit mir" | Apply `references/voice-setup.md`; keep voice optional. |
@@ -163,6 +163,16 @@ Read `references/morning-briefing.md`. Use read-only connector operations first,
 ### 5. Manage email, calendar, tasks, and reminders
 
 Read `references/productivity-operations.md` before operating on personal productivity data. Draft email replies instead of sending, propose calendar changes before creating them, and route durable tasks to the configured task source. Apply `references/approval-policy.md` before any external write.
+
+For a natural request to review open tasks, use the configured read-only task source. When `jarvis.task_source` is `kanban` and `kanban_list` is available in this chat's approved toolset, call it and summarize only its returned data. Do not claim that tasks were checked when the tool was unavailable, failed, or was not called. Do not use task mutations for a read request.
+
+For a combined read-only Gmail and Calendar overview, load `google-workspace`, then run `scripts/jarvis_google_workspace_read.py` with `terminal`. This helper invokes only the existing Google Workspace read commands for unread mail and upcoming events. Summarize only a successful JSON result; name missing authorization, permissions, or tool failures instead of inventing coverage. Do not invoke send, reply, modify, create, delete, RSVP, or any other write command for this workflow.
+
+For an unread-Gmail request, such as "Welche E-Mails sind ungelesen?", load `google-workspace`, then run `scripts/jarvis_gmail_unread_read.py` with `terminal`. This helper invokes only the existing `gmail search is:unread` command and returns sender, subject, and date metadata. Summarize only a successful JSON result; never use it to send, modify, delete, or mark messages.
+
+For calendar-only reads, load `google-workspace`, then run `scripts/jarvis_calendar_read.py` with `terminal` and exactly one matching window: `--window today` for today's agenda, `--window tomorrow` for "Welche Termine habe ich morgen?", `--window week` for "Was steht diese Woche im Kalender?", or `--window next` for "Zeige meine nächsten Termine." This helper uses the active Hermes profile timezone and invokes only the existing bounded `calendar list` command. Summarize only a successful JSON result; never create, update, delete, RSVP to, or invite attendees to an event.
+
+For "Plane meinen heutigen Tag", "Was habe ich heute vor?", "Welche Aufgaben sollte ich zuerst erledigen?", or "Gib mir mein Tagesbriefing", load `google-workspace`, run `scripts/jarvis_calendar_read.py --window today` with `terminal`, and call `kanban_list` in the approved toolset. Treat both source checks independently: name calendar and tasks as verified only after their corresponding successful tool result. If either call fails, show only the successful source and explicitly name the gap; never present a global successful briefing. Order tasks only by returned priority and any explicit due information returned by the tool. If deadlines, availability, event categories, bookings, offers, or business context are absent, mark them as unavailable rather than inferring them. Detect a calendar conflict only when a returned task contains a concrete time range that overlaps a returned event; otherwise state that no conflict check was possible. Keep the overview compact with separate "Termine", "Aufgaben", "Offene Daten" and, when later provided by verified sources, VIRUS EVENT sections for events, artist bookings, business appointments, offers, and important tasks.
 
 ### 6. Automate repeatable workflows
 

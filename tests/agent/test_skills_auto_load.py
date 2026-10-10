@@ -65,6 +65,29 @@ class TestBuildAutoLoadPrompt:
         assert loaded == ["pinned-skill", "extra-skill"] and missing == []
         assert "PINNED CONTENT" not in prompt and "EXTRA CONTENT" in prompt
 
+    def test_jarvis_auto_load_isolated_to_its_configured_profile(self, tmp_path):
+        from agent.skill_commands import build_auto_load_prompt
+
+        jarvis_home = tmp_path / "jarvis"
+        other_home = tmp_path / "other"
+        _write_skill(jarvis_home / "skills", "jarvis-assistant", "JARVIS CONTENT")
+        _write_skill(other_home / "skills", "jarvis-assistant", "OTHER PROFILE CONTENT")
+        (jarvis_home / "config.yaml").write_text(
+            "skills:\n  auto_load: ['jarvis-assistant']\n", encoding="utf-8"
+        )
+        (other_home / "config.yaml").write_text("skills: {}\n", encoding="utf-8")
+
+        jarvis_prompt, jarvis_loaded, jarvis_missing = build_auto_load_prompt(
+            task_id="jarvis-session", home_override=jarvis_home
+        )
+        other_prompt, other_loaded, other_missing = build_auto_load_prompt(
+            task_id="other-session", home_override=other_home
+        )
+
+        assert jarvis_loaded == ["jarvis-assistant"] and jarvis_missing == []
+        assert "JARVIS CONTENT" in jarvis_prompt
+        assert other_prompt == "" and other_loaded == [] and other_missing == []
+
 
 class TestSharedPromptPath:
     def test_prompt_is_byte_stable_after_config_and_skill_mutation(self, tmp_path, monkeypatch):

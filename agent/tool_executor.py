@@ -1154,6 +1154,16 @@ def _commit_tool_result(
     if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
         return None
 
+    # Jarvis receipts are derived only after Hermes has durably committed the real tool result.
+    try:
+        from agent.jarvis_execution import record_agent_tool_result
+
+        record_agent_tool_result(
+            agent, function_name, function_result, function_args=function_args, blocked=blocked
+        )
+    except Exception:
+        logger.debug("Jarvis tool receipt failed", exc_info=True)
+
     if not blocked:
         # ``tool.completed`` projects AFTER the canonical append + flush so resume can
         # reconstruct the result even if the UI bridge dies mid-projection.

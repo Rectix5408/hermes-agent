@@ -97,6 +97,18 @@ class JarvisApprovalDecision(BaseModel):
 class JarvisSettingsUpdate(BaseModel):
     settings: dict[str, Any] = {}
 
+class JarvisKanbanListRequest(BaseModel):
+    board: Optional[str] = None
+    status: Optional[str] = None
+    assignee: Optional[str] = None
+    tenant: Optional[str] = None
+    include_archived: bool = False
+    limit: int = 20
+
+class JarvisOpenTasksRequest(BaseModel):
+    request: str
+    limit: int = 20
+
 class ManagedFileUpload(BaseModel):
     path: str
     data_url: str

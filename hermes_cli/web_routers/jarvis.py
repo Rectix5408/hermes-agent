@@ -19,10 +19,13 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 
+from agent.jarvis_execution import persist_execution_receipt, tool_execution_receipt
 from hermes_cli.config import atomic_config_write, get_config_path, load_config, load_env
 from hermes_constants import get_hermes_home
 from hermes_cli.web_models import (
     JarvisApprovalDecision,
+    JarvisKanbanListRequest,
+    JarvisOpenTasksRequest,
     JarvisOrchestrationRequest,
     JarvisSettingsUpdate,
 )
@@ -232,6 +235,10 @@ def _runs_path() -> Path:
     return Path(get_hermes_home()) / "jarvis" / "runs.jsonl"
 
 
+def _executions_path() -> Path:
+    return Path(get_hermes_home()) / "jarvis" / "executions.jsonl"
+
+
 def _approvals_path() -> Path:
     return Path(get_hermes_home()) / "jarvis" / "approvals.json"
 
@@ -333,6 +340,89 @@ def _recent_runs(limit: int = 20) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return list(reversed(rows))
+
+
+def _tool_execution_receipt(tool_name: str, raw_result: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    return tool_execution_receipt(tool_name, raw_result)
+
+
+def _persist_execution_receipt(receipt: dict[str, Any]) -> None:
+    persist_execution_receipt(receipt, home=Path(get_hermes_home()))
+
+
+def _is_open_tasks_request(request: str) -> bool:
+    words = {word.strip(".,!?;:").lower() for word in request.split()}
+    return any(word.startswith("aufgab") for word in words) and any(word.startswith("offen") for word in words)
+
+
+def _restrict_open_tasks_tools(agent: Any) -> None:
+    """Keep the one-shot agent's model-visible and dispatch-valid surface identical."""
+    agent.tools = [
+        tool for tool in agent.tools
+        if isinstance(tool, dict) and tool.get("function", {}).get("name") == "kanban_list"
+    ]
+    agent.valid_tool_names = {"kanban_list"} if agent.tools else set()
+
+
+def _build_open_tasks_agent():
+    from run_agent import AIAgent
+
+    agent = AIAgent(
+        platform="dashboard",
+        quiet_mode=True,
+        max_iterations=2,
+        enabled_toolsets=["kanban"],
+        skip_context_files=True,
+        skip_memory=True,
+        session_db=None,
+        save_trajectories=False,
+    )
+    _restrict_open_tasks_tools(agent)
+    return agent
+
+
+def _latest_tool_result(turn: dict[str, Any], tool_name: str) -> Any:
+    messages = turn.get("messages") if isinstance(turn, dict) else None
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "tool" and message.get("name") == tool_name:
+            return message.get("content")
+    return None
+
+
+def _run_open_tasks_agent(request: str, limit: int) -> dict[str, Any]:
+    agent = _build_open_tasks_agent()
+    prompt = (
+        f"{request.strip()}\n\n"
+        f"Rufe genau einmal kanban_list mit limit={max(1, min(limit, 50))} auf. "
+        "Nutze keine anderen Werkzeuge. Fasse danach ausschließlich das bestätigte Tool-Ergebnis zusammen."
+    )
+    try:
+        turn = agent.run_conversation(prompt, task_id="jarvis-open-tasks")
+        raw_result = _latest_tool_result(turn, "kanban_list")
+    except Exception:
+        receipt = {"tool": "kanban_list", "status": "failed", "created_at": time(), "error": "Agent loop failed."}
+        _persist_execution_receipt(receipt)
+        return {"ok": False, "receipt": receipt, "result": None, "response": None}
+
+    if raw_result is None:
+        receipt = {"tool": "kanban_list", "status": "failed", "created_at": time(), "error": "Agent did not call kanban_list."}
+        _persist_execution_receipt(receipt)
+        return {"ok": False, "receipt": receipt, "result": None, "response": turn.get("final_response")}
+    receipts = getattr(agent, "_jarvis_execution_receipts", [])
+    receipt = receipts[-1] if isinstance(receipts, list) and receipts else None
+    if receipt is None:
+        receipt, result = _tool_execution_receipt("kanban_list", raw_result)
+        _persist_execution_receipt(receipt)
+    else:
+        _ignored_receipt, result = _tool_execution_receipt("kanban_list", raw_result)
+    return {
+        "ok": receipt["status"] == "completed",
+        "receipt": receipt,
+        "result": result,
+        "response": turn.get("final_response"),
+    }
 
 
 def _status_sync(profile: Optional[str]) -> dict[str, Any]:
@@ -483,6 +573,45 @@ async def get_jarvis_runs(profile: Optional[str] = None, limit: int = 20):
             return {"ok": True, "runs": _recent_runs(limit)}
 
     return await asyncio.to_thread(_load)
+
+
+@router.post("/api/jarvis/executions/kanban-list")
+async def execute_jarvis_kanban_list(body: JarvisKanbanListRequest, profile: Optional[str] = None):
+    """Run one bounded, read-only Jarvis task through Hermes' normal tool dispatcher."""
+    def _run():
+        args = {
+            "include_archived": body.include_archived,
+            "limit": max(1, min(body.limit, 50)),
+        }
+        for key in ("board", "status", "assignee", "tenant"):
+            value = getattr(body, key)
+            if value:
+                args[key] = value
+        with _config_profile_scope(profile):
+            from model_tools import handle_function_call
+
+            raw_result = handle_function_call(
+                "kanban_list", args, task_id="jarvis-kanban-read",
+                user_task="Jarvis liest Aufgaben aus dem Kanban.", enabled_toolsets=["kanban"],
+            )
+            receipt, result = _tool_execution_receipt("kanban_list", raw_result)
+            _persist_execution_receipt(receipt)
+            return {"ok": receipt["status"] == "completed", "receipt": receipt, "result": result}
+
+    return await _call_orchestrator(_run)
+
+
+@router.post("/api/jarvis/executions/open-tasks")
+async def execute_jarvis_open_tasks(body: JarvisOpenTasksRequest, profile: Optional[str] = None):
+    request = body.request.strip()
+    if not _is_open_tasks_request(request):
+        raise HTTPException(status_code=400, detail="This endpoint only supports asking for open tasks.")
+
+    def _run():
+        with _config_profile_scope(profile):
+            return _run_open_tasks_agent(request, body.limit)
+
+    return await _call_orchestrator(_run)
 
 
 @router.post("/api/jarvis/orchestrator/plan")

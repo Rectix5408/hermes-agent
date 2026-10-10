@@ -944,7 +944,10 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     raw, status, last_reasoning = _turn_outcome(result, _error_surface)
     if _is_bot_mode_session(session):
         raw = _bot_mode_delivery_text(raw, successful=status == "complete")
-    payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+    from agent.jarvis_execution import response_with_verified_daily_briefing
+
+    display_text = response_with_verified_daily_briefing(result, raw)
+    payload = {"text": display_text, "usage": _get_usage(agent), "status": status}
     if receipt := _persisted_turn_receipt(st, raw, status):
         payload["persisted_turn"] = receipt
     if last_reasoning:
@@ -967,7 +970,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     if _billing_block := result.get("billing_block"):
         payload["billing"] = _billing_block
         payload["failure_reason"] = result.get("failure_reason")
-    if rendered := render_message(raw, cols):
+    if rendered := render_message(display_text, cols):
         payload["rendered"] = rendered
     error_value = result.get("error")
     final_text = result.get("final_response")

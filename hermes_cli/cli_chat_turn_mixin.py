@@ -684,7 +684,13 @@ class CLIChatTurnMixin:
             ChatConsole, _ACCENT, _RST, _cprint, _maybe_remap_for_light_mode, _post_stream_transform_output,
             _render_final_assistant_content,
         )
-        if response and not (turn.result and turn.result.get("response_previewed", False)):
+        from agent.jarvis_execution import response_with_verified_daily_briefing, verified_daily_briefing_text
+
+        result = turn.result or {}
+        briefing = verified_daily_briefing_text(result, response)
+        display_response = response_with_verified_daily_briefing(result, response)
+        response_previewed = bool(result.get("response_previewed", False))
+        if (response or briefing) and not (response_previewed and not briefing):
             try:
                 from hermes_cli.skin_engine import get_active_skin
                 _skin = get_active_skin()
@@ -710,15 +716,22 @@ class CLIChatTurnMixin:
             if turn.use_streaming_tts and turn.box_opened and not is_error_response:
                 # Text already printed sentence-by-sentence; just close the box.
                 _cprint(f"\n{_ACCENT}╰{'─' * (self._scrollback_box_width() - 2)}╯{_RST}")
+                if briefing:
+                    _cprint(f"\n\n{briefing}")
             elif already_streamed:
                 # _flush_stream() already closed the streamed box; a post-stream transform
                 # hook shows a suffix for append-only changes, else the full replacement.
                 _post_stream_text = _post_stream_transform_output(response, turn.result)
+                if briefing:
+                    _post_stream_text = f"{_post_stream_text.rstrip()}\n\n{briefing}"
                 if _post_stream_text.strip():
                     _cprint(_post_stream_text)
             else:
                 ChatConsole().print(Panel(
-                    _render_final_assistant_content(response, mode=self.final_response_markdown),
+                    _render_final_assistant_content(
+                        briefing if response_previewed else display_response,
+                        mode=self.final_response_markdown,
+                    ),
                     title=f"[{_resp_color} bold]{label}[/]", title_align="left", border_style=_resp_color,
                     style=_resp_text, box=rich_box.HORIZONTALS, padding=(1, 0),
                     width=self._scrollback_box_width(),

@@ -1,0 +1,51 @@
+name: Jarvis Ubuntu Validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jarvis-ubuntu-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  jarvis-tests:
+    name: Jarvis read-only workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["all"]'
+          packages: 'ripgrep'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Run Jarvis mock workflows
+        run: |
+          scripts/run_tests.sh \
+            tests/agent/test_jarvis_execution.py \
+            tests/agent/test_skills_auto_load.py \
+            tests/hermes_cli/test_jarvis_web_router.py \
+            tests/hermes_cli/test_verified_daily_briefing_presentation.py \
+            tests/tui_gateway/test_verified_daily_briefing_presentation.py \
+            tests/skills/test_jarvis_assistant_skill.py \
+            tests/skills/test_jarvis_multi_agent.py \
+            tests/skills/test_jarvis_calendar_read.py \
+            tests/skills/test_jarvis_gmail_unread_read.py \
+            tests/skills/test_jarvis_google_workspace_read.py \
+            tests/skills/test_google_workspace_api.py \
+            tests/skills/test_google_workspace_credential_files.py \
+            -q
+        env:
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+          ELEVENLABS_API_KEY: ''

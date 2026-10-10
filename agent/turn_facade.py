@@ -57,6 +57,12 @@ class TurnFacadeMixin:
         from hermes_cli.observability.relay_shared_metrics import finish_task_run, start_task_run
 
         effective_task_id = task_id or str(uuid.uuid4())
+        try:
+            from agent.jarvis_execution import begin_verified_daily_briefing_turn
+
+            begin_verified_daily_briefing_turn(self, effective_task_id)
+        except Exception:
+            logger.debug("Jarvis daily briefing turn setup failed", exc_info=True)
         session_id = str(getattr(self, "session_id", None) or "")
         task_context = {
             "session_id": session_id,

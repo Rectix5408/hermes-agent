@@ -5,11 +5,18 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hermes_cli.web_models import JarvisApprovalDecision, JarvisOrchestrationRequest
+from hermes_cli.web_models import (
+    JarvisApprovalDecision,
+    JarvisKanbanListRequest,
+    JarvisOpenTasksRequest,
+    JarvisOrchestrationRequest,
+)
 from hermes_cli.web_routers import jarvis
 
 
@@ -221,6 +228,176 @@ def test_run_endpoint_never_executes_external_actions(monkeypatch):
 
     assert output["status"] == "completed"
     assert output["consolidated"]["external_actions_executed"] is False
+
+
+def test_kanban_read_completion_requires_native_tool_success(tmp_path, monkeypatch):
+    import model_tools
+
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(model_tools, "handle_function_call", lambda *args, **kwargs: '{"count": 2, "tasks": []}')
+
+    output = asyncio.run(jarvis.execute_jarvis_kanban_list(JarvisKanbanListRequest(limit=100), profile="default"))
+
+    assert output["ok"] is True
+    assert output["receipt"]["status"] == "completed"
+    assert output["receipt"]["count"] == 2
+    assert output["result"] == {"count": 2, "tasks": []}
+    assert '"status": "completed"' in (tmp_path / "jarvis" / "executions.jsonl").read_text(encoding="utf-8")
+
+
+def test_kanban_read_never_marks_tool_error_completed(tmp_path, monkeypatch):
+    import model_tools
+
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(model_tools, "handle_function_call", lambda *args, **kwargs: '{"error": "board unavailable"}')
+
+    output = asyncio.run(jarvis.execute_jarvis_kanban_list(JarvisKanbanListRequest(), profile="default"))
+
+    assert output["ok"] is False
+    assert output["receipt"]["status"] == "failed"
+    assert output["result"] == {"error": "board unavailable"}
+    assert '"status": "completed"' not in (tmp_path / "jarvis" / "executions.jsonl").read_text(encoding="utf-8")
+
+
+def _tool_call(name: str):
+    return SimpleNamespace(
+        id="call-1", type="function", function=SimpleNamespace(name=name, arguments="{}"),
+    )
+
+
+class _OpenTasksProvider:
+    def __init__(self, first_tool: str | None):
+        self.first_tool = first_tool
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1 and self.first_tool:
+            message = SimpleNamespace(content=None, reasoning=None, tool_calls=[_tool_call(self.first_tool)])
+            return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="tool_calls")], usage=None)
+        message = SimpleNamespace(content="Die Aufgaben sind erledigt.", reasoning=None, tool_calls=[])
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+
+def _real_open_tasks_agent(monkeypatch, first_tool: str | None):
+    from run_agent import AIAgent
+
+    provider = _OpenTasksProvider(first_tool)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=provider))
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", lambda **kwargs: client)
+    monkeypatch.setattr(
+        "model_tools.get_tool_definitions",
+        lambda *args, **kwargs: [
+            {"type": "function", "function": {"name": "kanban_list", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "kanban_complete", "parameters": {"type": "object"}}},
+        ],
+    )
+    agent = AIAgent(
+        model="test-model", api_key="test-key", base_url="http://localhost:8080/v1", provider="custom",
+        platform="dashboard", quiet_mode=True, max_iterations=2, skip_context_files=True, skip_memory=True,
+        enabled_toolsets=["kanban"], session_db=None,
+    )
+    agent._disable_streaming = True
+    jarvis._restrict_open_tasks_tools(agent)
+    return agent, provider
+
+
+def test_open_tasks_uses_real_agent_loop_and_verified_tool_result(tmp_path, monkeypatch):
+    import model_tools
+    from agent import jarvis_execution
+
+    agent, provider = _real_open_tasks_agent(monkeypatch, "kanban_list")
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis_execution, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(jarvis, "_build_open_tasks_agent", lambda: agent)
+    monkeypatch.setattr(
+        model_tools, "handle_function_call",
+        lambda name, args, task_id=None, **kwargs: json.dumps({"count": 1, "tasks": []}),
+    )
+    agent._jarvis_execution_enabled = True
+
+    output = asyncio.run(jarvis.execute_jarvis_open_tasks(JarvisOpenTasksRequest(request="Jarvis, welche Aufgaben sind offen?")))
+
+    assert output["ok"] is True
+    assert output["receipt"]["status"] == "completed"
+    assert provider.calls[0]["tools"] == agent.tools
+    assert agent.valid_tool_names == {"kanban_list"}
+    assert len((tmp_path / "jarvis" / "executions.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_open_tasks_rejects_fabricated_or_disallowed_agent_results(tmp_path, monkeypatch):
+    import model_tools
+
+    agent, _provider = _real_open_tasks_agent(monkeypatch, "kanban_complete")
+    tool_calls: list[str] = []
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(jarvis, "_build_open_tasks_agent", lambda: agent)
+    monkeypatch.setattr(model_tools, "handle_function_call", lambda name, *args, **kwargs: tool_calls.append(name) or "{}")
+
+    output = asyncio.run(jarvis.execute_jarvis_open_tasks(JarvisOpenTasksRequest(request="Welche Aufgaben sind offen?")))
+
+    assert output["ok"] is False
+    assert output["receipt"]["error"] == "Agent did not call kanban_list."
+    assert tool_calls == []
+    assert '"status": "completed"' not in (tmp_path / "jarvis" / "executions.jsonl").read_text(encoding="utf-8")
+
+
+def test_open_tasks_requires_a_confirmed_tool_result(tmp_path, monkeypatch):
+    agent, _provider = _real_open_tasks_agent(monkeypatch, None)
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(jarvis, "_build_open_tasks_agent", lambda: agent)
+
+    output = asyncio.run(jarvis.execute_jarvis_open_tasks(JarvisOpenTasksRequest(request="Welche Aufgaben sind offen?")))
+
+    assert output["ok"] is False
+    assert output["receipt"]["status"] == "failed"
+
+
+def test_open_tasks_marks_native_tool_errors_failed(tmp_path, monkeypatch):
+    import model_tools
+
+    agent, _provider = _real_open_tasks_agent(monkeypatch, "kanban_list")
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(jarvis, "_build_open_tasks_agent", lambda: agent)
+    monkeypatch.setattr(
+        model_tools, "handle_function_call",
+        lambda name, args, task_id=None, **kwargs: '{"error": "board unavailable"}',
+    )
+
+    output = asyncio.run(jarvis.execute_jarvis_open_tasks(JarvisOpenTasksRequest(request="Welche Aufgaben sind offen?")))
+
+    assert output["ok"] is False
+    assert output["receipt"]["status"] == "failed"
+    assert output["result"] == {"error": "board unavailable"}
+
+
+def test_open_tasks_marks_provider_failures_failed(tmp_path, monkeypatch):
+    class FailingAgent:
+        def run_conversation(self, *_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(jarvis, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(jarvis, "_config_profile_scope", null_scope)
+    monkeypatch.setattr(jarvis, "_build_open_tasks_agent", FailingAgent)
+
+    output = asyncio.run(jarvis.execute_jarvis_open_tasks(JarvisOpenTasksRequest(request="Welche Aufgaben sind offen?")))
+
+    assert output["ok"] is False
+    assert output["receipt"]["error"] == "Agent loop failed."
+    assert '"status": "completed"' not in (tmp_path / "jarvis" / "executions.jsonl").read_text(encoding="utf-8")
+
+
+def test_open_tasks_rejects_unrelated_requests():
+    with pytest.raises(Exception) as exc:
+        asyncio.run(jarvis.execute_jarvis_open_tasks(JarvisOpenTasksRequest(request="Sende eine E-Mail")))
+
+    assert getattr(exc.value, "status_code", None) == 400
 
 
 def test_unknown_agent_returns_404(monkeypatch):

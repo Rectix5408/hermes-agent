@@ -47,17 +47,19 @@ voice:
   voice_chat_mode: chained
   auto_tts: false
 skills:
+  auto_load: [jarvis-assistant]
   config:
-    jarvis:
-      language: de
-      timezone: Europe/Berlin
-      briefing_day: today
-      voice_enabled: false
-      memory_review: ask
-      task_source: kanban
-      email_mode: drafts
-      automation_review: approve
+    jarvis.language: de
+    jarvis.timezone: Europe/Berlin
+    jarvis.briefing_day: today
+    jarvis.voice_enabled: false
+    jarvis.memory_review: ask
+    jarvis.task_source: kanban
+    jarvis.email_mode: drafts
+    jarvis.automation_review: approve
 ```
+
+`skills.config` uses the literal dotted keys declared by the skill, not a nested `jarvis:` map. Add `jarvis-assistant` to `skills.auto_load` only in the intended profile; existing sessions retain their current prompt until a new session begins.
 
 Only enable `voice_enabled` after STT/TTS has been verified. Accept the morning briefing blueprint through Hermes suggestions or create the cron job manually after a successful foreground briefing.
 

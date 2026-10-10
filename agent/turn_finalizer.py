@@ -716,6 +716,14 @@ def finalize_turn(
         ).get("service_tier"),
         "session_id": agent.session_id,
     }
+    try:
+        from agent.jarvis_execution import verified_daily_briefing
+
+        briefing = verified_daily_briefing(agent)
+        if briefing is not None:
+            result["verified_daily_briefing"] = briefing
+    except Exception:
+        logger.debug("Jarvis verified daily briefing assembly failed", exc_info=True)
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # Persistence failures already set failed=True; also stamp `error` so the gateway

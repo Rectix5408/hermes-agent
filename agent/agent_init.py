@@ -1445,6 +1445,14 @@ def _apply_agent_section(agent, _agent_cfg):
         agent._auto_recovery_cycles = 5
 
 
+def _configure_jarvis_execution(agent, config: dict[str, Any]) -> None:
+    """Enable the shared Jarvis receipt observer only for an opted-in skill profile."""
+    from agent.jarvis_execution import jarvis_execution_enabled
+
+    agent._jarvis_execution_enabled = jarvis_execution_enabled(config)
+    agent._jarvis_execution_receipts: list[dict[str, Any]] = []
+
+
 def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:
     """``int(raw)`` when positive, else None. ``reject`` lists types refused outright (bool, float)."""
     if reject and isinstance(raw, reject):
@@ -2478,6 +2486,7 @@ def init_agent(
     _apply_display_config(agent, _agent_cfg, platform)
     _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
     _apply_agent_section(agent, _agent_cfg)
+    _configure_jarvis_execution(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(
         agent, _agent_cfg, base_url
