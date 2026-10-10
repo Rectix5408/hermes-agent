@@ -2,7 +2,7 @@ import { LockKeyhole, MemoryStick, Mic, Radio } from 'lucide-react'
 import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
 import { configuredIntegration, memoryTelemetry } from '../../cinematic/live-runtime'
 
-interface CinematicHudProps { status: JarvisStatusResponse | null; memory: MemoryStatus | null; voiceBusy: 'recording' | 'transcribing' | 'speaking' | null; result: JarvisOrchestrationResponse | null }
+interface CinematicHudProps { status: JarvisStatusResponse | null; memory: MemoryStatus | null; voiceBusy: 'recording' | 'transcribing' | 'thinking' | 'speaking' | null; result: JarvisOrchestrationResponse | null }
 export function CinematicHud({ status, memory, voiceBusy, result }: CinematicHudProps) {
   const memoryState = memoryTelemetry(memory)
   const configured = (status?.integrations ?? []).filter(item => ['available', 'configured'].includes(item.status)).length

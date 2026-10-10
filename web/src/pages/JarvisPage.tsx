@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { RefreshCw } from 'lucide-react'
 import { Button } from '@nous-research/ui/ui/components/button'
@@ -8,9 +8,11 @@ import { api } from '@/lib/api'
 import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
 import { errorMessage } from '@/lib/api-error'
 import { usePageHeader } from '@/contexts/usePageHeader'
-import { JarvisDashboard } from './jarvis/JarvisDashboard'
+import { JarvisShell } from './jarvis/JarvisShell'
 import { emit } from './jarvis/runtime/event-bus'
 import { routeVoiceCommand } from './jarvis/cinematic/voice-command-router'
+import { applyVoiceSpeedCommand } from './jarvis/cinematic/voice-settings'
+import { appendVoiceHistory, microphoneErrorMessage, transitionVoiceState, type ProductionVoiceState, type VoiceHistoryEntry } from './jarvis/voice-runtime/production-state'
 
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -34,8 +36,18 @@ export default function JarvisPage() {
   const [payloadText, setPayloadText] = useState('{\n  "topics": ["Jarvis", "Automatisierung"],\n  "tasks": []\n}')
   const [result, setResult] = useState<JarvisOrchestrationResponse | null>(null)
   const [error, setError] = useState('')
-  const [voiceBusy, setVoiceBusy] = useState<'recording' | 'transcribing' | 'speaking' | null>(null)
+  const [voiceBusy, setVoiceBusy] = useState<'recording' | 'transcribing' | 'thinking' | 'speaking' | null>(null)
+  const [voiceState, setVoiceState] = useState<ProductionVoiceState>('idle')
+  const [voiceHistory, setVoiceHistory] = useState<VoiceHistoryEntry[]>([])
   const [autoSpeak, setAutoSpeak] = useState(false)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const recordingTimerRef = useRef<number | null>(null)
+  const setVoicePhase = (next: ProductionVoiceState) => setVoiceState(current => transitionVoiceState(current, next))
+
+  useEffect(() => () => {
+    if (recordingTimerRef.current) window.clearTimeout(recordingTimerRef.current)
+    if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop()
+  }, [])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -75,6 +87,7 @@ export default function JarvisPage() {
 
   const speak = async (text: string, speed = 1) => {
     setVoiceBusy('speaking')
+    setVoicePhase('speaking')
     try {
       const audio = await api.speakText(text)
       await new Promise<void>((resolve, reject) => {
@@ -86,8 +99,10 @@ export default function JarvisPage() {
       })
     } catch (err) {
       setError(errorMessage(err))
+      setVoicePhase('error')
     } finally {
       setVoiceBusy(null)
+      setVoiceState(current => current === 'error' ? current : 'idle')
     }
   }
 
@@ -139,27 +154,40 @@ export default function JarvisPage() {
     }
   }
 
-  const executeVoiceCommand = async (transcript: string) => {
+  const executeVoiceCommand = async (transcript: string): Promise<string> => {
+    const speed = applyVoiceSpeedCommand(transcript)
+    if (speed) { showToast(`Sprechgeschwindigkeit: ${speed.speed.toFixed(2)}×`, 'success'); return 'TTS Geschwindigkeit angepasst' }
     const command = routeVoiceCommand(transcript)
-    if (!command) return
+    if (!command) return 'Kein deterministischer Befehl erkannt'
     const matchingAgent = status?.agents.find(agent => agent.agent_id.toLowerCase().includes(command.agentHint))?.agent_id ?? 'auto'
     setRequest(command.request)
     setSelectedAgent(matchingAgent)
     showToast(command.response, 'success')
     emit({ source: 'voice', type: 'VOICE_COMMAND_ROUTED', status: 'completed', payload: { agent: matchingAgent } })
-    if (command.execute) await run('run', { request: command.request, agentId: matchingAgent })
+    if (command.execute) { setVoiceBusy('thinking'); setVoicePhase('thinking'); await run('run', { request: command.request, agentId: matchingAgent }) }
     else await refresh()
+    return command.response
+  }
+
+  const processVoiceTranscript = async (transcript: string) => {
+    setVoicePhase('processing')
+    setRequest(transcript)
+    const action = await executeVoiceCommand(transcript)
+    setVoiceHistory(history => appendVoiceHistory(history, transcript, action))
+    setVoiceState(current => current === 'error' ? current : 'idle')
   }
 
   const recordVoice = async () => {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined')
       return showToast('Browseraufnahme ist hier nicht verfügbar.', 'error')
     setVoiceBusy('recording')
+    setVoicePhase('listening')
     emit({ source: 'voice', type: 'LISTENING_STARTED', status: 'started' })
     setError('')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const recorder = new MediaRecorder(stream)
+      recorderRef.current = recorder
       const chunks: Blob[] = []
       recorder.ondataavailable = event => {
         if (event.data.size > 0) chunks.push(event.data)
@@ -167,29 +195,38 @@ export default function JarvisPage() {
       const stopped = new Promise<Blob>(resolve => {
         recorder.onstop = () => {
           stream.getTracks().forEach(track => track.stop())
+          recorderRef.current = null
+          if (recordingTimerRef.current) window.clearTimeout(recordingTimerRef.current)
+          recordingTimerRef.current = null
           resolve(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
         }
       })
       recorder.start()
-      window.setTimeout(() => {
+      recordingTimerRef.current = window.setTimeout(() => {
         if (recorder.state !== 'inactive') recorder.stop()
-      }, 7000)
+      }, 60_000)
       const blob = await stopped
       setVoiceBusy('transcribing')
+      setVoicePhase('processing')
       const transcript = await api.transcribeAudio(await blobToDataUrl(blob), blob.type || 'audio/webm')
       if (transcript.transcript) {
-        setRequest(transcript.transcript)
         emit({ source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed', payload: { provider: transcript.provider ?? 'configured' } })
         showToast('Sprache erkannt.', 'success')
-        await executeVoiceCommand(transcript.transcript)
+        await processVoiceTranscript(transcript.transcript)
       } else {
         showToast('Keine Sprache erkannt.', 'error')
       }
     } catch (err) {
-      setError(errorMessage(err))
+      setError(microphoneErrorMessage(err))
+      setVoicePhase('error')
     } finally {
       setVoiceBusy(null)
+      setVoiceState(current => current === 'error' ? current : 'idle')
     }
+  }
+
+  const stopVoice = () => {
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
   }
 
   const decideApproval = async (id: string, decision: 'approve' | 'deny') => {
@@ -214,7 +251,7 @@ export default function JarvisPage() {
   return (
     <>
       <Toast toast={toast} />
-      <JarvisDashboard
+      <JarvisShell
         status={status}
         memory={memory}
         loading={loading}
@@ -226,6 +263,8 @@ export default function JarvisPage() {
         result={result}
         error={error}
         voiceBusy={voiceBusy}
+        voiceState={voiceState}
+        voiceHistory={voiceHistory}
         autoSpeak={autoSpeak}
         onNavigate={navigate}
         onRequestChange={setRequest}
@@ -233,6 +272,8 @@ export default function JarvisPage() {
         onAgentSelect={setSelectedAgent}
         onRun={run}
         onRecordVoice={recordVoice}
+        onStopVoice={stopVoice}
+        onVoiceTranscript={processVoiceTranscript}
         onSpeak={speak}
         onAutoSpeakChange={setAutoSpeak}
         onApprovalDecision={decideApproval}

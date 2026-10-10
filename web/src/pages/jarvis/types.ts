@@ -36,7 +36,7 @@ export interface JarvisVisualProps {
   loading: boolean
   busy: 'plan' | 'run' | null
   result: JarvisOrchestrationResponse | null
-  voiceBusy: 'recording' | 'transcribing' | 'speaking' | null
+  voiceBusy: 'recording' | 'transcribing' | 'thinking' | 'speaking' | null
 }
 
 export interface ActivityEntry {
