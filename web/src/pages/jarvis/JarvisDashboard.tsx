@@ -1,4 +1,5 @@
 import { AlertTriangle, Bot, Play, Send, Sparkles, SquareCode, Volume2 } from 'lucide-react'
+import { useState } from 'react'
 import { Button } from '@nous-research/ui/ui/components/button'
 import { Spinner } from '@nous-research/ui/ui/components/spinner'
 import { AgentActivity } from './components/AgentActivity'
@@ -17,9 +18,26 @@ import { VoiceCore } from './components/voice/VoiceCore'
 import { VoiceRuntimePanel } from './components/voice-runtime/VoiceRuntimePanel'
 import { TaskCenter } from './components/tasks/TaskCenter'
 import { JarvisCore } from './components/visual/JarvisCore'
+import { CinematicAgentCards } from './components/cinematic/CinematicAgentCards'
+import { CinematicNavigation } from './components/cinematic/CinematicNavigation'
+import { CinematicVoiceConsole } from './components/cinematic/CinematicVoiceConsole'
+import { SystemPulseCards } from './components/cinematic/SystemPulseCards'
+import { CinematicHud } from './components/cinematic/CinematicHud'
+import { LiveSystemCore } from './components/cinematic/LiveSystemCore'
+import { AgentCommandRoster } from './components/cinematic/AgentCommandRoster'
+import { AgentAutomationCenter } from './components/autonomy/AgentAutomationCenter'
+import { MemoryIntelligence } from './components/autonomy/MemoryIntelligence'
+import { MorningBriefing } from './components/autonomy/MorningBriefing'
+import { SecurityCenter } from './components/autonomy/SecurityCenter'
+import { UnifiedApprovalPanel } from './components/autonomy/UnifiedApprovalPanel'
+import { WakeWordControl } from './components/autonomy/WakeWordControl'
+import type { MemoryStatus } from '@/lib/api'
 import { runtimeEvents, type JarvisVisualProps } from './types'
+import './jarvis-cinematic.css'
+import { emit } from './runtime/event-bus'
 
 interface JarvisDashboardProps extends JarvisVisualProps {
+  memory: MemoryStatus | null
   selectedAgent: string
   request: string
   payloadText: string
@@ -41,25 +59,35 @@ interface JarvisDashboardProps extends JarvisVisualProps {
 export function JarvisDashboard(props: JarvisDashboardProps) {
   const visualProps: JarvisVisualProps = props
   const events = runtimeEvents(visualProps)
+  const [wakeWordArmed, setWakeWordArmed] = useState(false)
+  const setWakeWord = (armed: boolean) => {
+    setWakeWordArmed(armed)
+    emit({ source: 'voice', type: armed ? 'WAKE_WORD_ARMED' : 'WAKE_WORD_DISARMED', status: armed ? 'running' : 'completed' })
+  }
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-5 text-slate-100">
+    <div className="jarvis-cinematic mx-auto w-full max-w-7xl space-y-5 text-slate-100">
       <div className="flex flex-wrap items-end justify-between gap-3 border-b border-cyan-300/15 pb-4">
         <div><p className="text-xs uppercase tracking-[0.28em] text-cyan-300/80">Hermes intelligence layer</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-50">Jarvis Command Center</h1></div>
         <div className="flex items-center gap-2 text-xs text-slate-400"><span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" /> Runtime data only · no visualization LLM calls</div>
       </div>
-      <JarvisCore />
+      <CinematicNavigation />
+      <CinematicHud status={props.status} memory={props.memory} voiceBusy={props.voiceBusy} result={props.result} />
+      <div id="jarvis-visual-core"><JarvisCore /></div>
+      <SystemPulseCards {...visualProps} />
+      <LiveSystemCore status={props.status} memory={props.memory} />
       <SystemStatus {...visualProps} />
+      <MorningBriefing status={props.status} memory={props.memory} />
       <section className="grid gap-5 xl:grid-cols-[minmax(18rem,0.75fr)_minmax(22rem,1.1fr)_minmax(18rem,0.75fr)]">
         <AgentActivity {...visualProps} /><BrainVisualization {...visualProps} /><SkillOverview {...visualProps} />
       </section>
-      <MemoryGraph />
-      <AgentControlCenter />
-      <VoiceCore />
+      <div id="jarvis-memory" className="space-y-5"><MemoryGraph /><MemoryIntelligence memory={props.memory} /></div>
+      <div id="jarvis-agents" className="space-y-5"><CinematicAgentCards status={props.status} busy={!!props.busy} result={props.result} /><AgentCommandRoster status={props.status} busy={!!props.busy} result={props.result} /><AgentAutomationCenter status={props.status} busy={!!props.busy} result={props.result} /><AgentControlCenter /></div>
+      <div className="space-y-5"><WakeWordControl armed={wakeWordArmed} onChange={setWakeWord} /><CinematicVoiceConsole status={props.status} voiceBusy={props.voiceBusy} response={props.result?.consolidated?.summary} onRecordVoice={props.onRecordVoice} onSpeak={props.onSpeak} /><VoiceCore /></div>
       <VoiceRuntimePanel />
       <TaskCenter />
-      <RuntimeEventStream />
-      <IntelligenceCenter />
-      <ApprovalCenter />
+      <div id="jarvis-runtime"><RuntimeEventStream /></div>
+      <div id="jarvis-intelligence"><IntelligenceCenter /></div>
+      <div id="jarvis-security" className="space-y-5"><UnifiedApprovalPanel approvals={props.status?.approvals.pending ?? []} onDecision={props.onApprovalDecision} /><ApprovalCenter /><SecurityCenter status={props.status} result={props.result} /></div>
       <ContextCenter />
       <section className="grid gap-5 xl:grid-cols-2"><BrainEventStream events={events} /><VoiceStatus {...visualProps} /></section>
       <CommandPanel {...props} />

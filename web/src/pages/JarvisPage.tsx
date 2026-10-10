@@ -5,10 +5,12 @@ import { Button } from '@nous-research/ui/ui/components/button'
 import { Toast } from '@nous-research/ui/ui/components/toast'
 import { useToast } from '@nous-research/ui/hooks/use-toast'
 import { api } from '@/lib/api'
-import type { JarvisOrchestrationResponse, JarvisStatusResponse } from '@/lib/api'
+import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
 import { errorMessage } from '@/lib/api-error'
 import { usePageHeader } from '@/contexts/usePageHeader'
 import { JarvisDashboard } from './jarvis/JarvisDashboard'
+import { emit } from './jarvis/runtime/event-bus'
+import { routeVoiceCommand } from './jarvis/cinematic/voice-command-router'
 
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -24,6 +26,7 @@ export default function JarvisPage() {
   const { toast, showToast } = useToast()
   const navigate = useNavigate()
   const [status, setStatus] = useState<JarvisStatusResponse | null>(null)
+  const [memory, setMemory] = useState<MemoryStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<'plan' | 'run' | null>(null)
   const [selectedAgent, setSelectedAgent] = useState('auto')
@@ -37,7 +40,9 @@ export default function JarvisPage() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      setStatus(await api.getJarvisStatus())
+      const [nextStatus, nextMemory] = await Promise.all([api.getJarvisStatus(), api.getMemory().catch(() => null)])
+      setStatus(nextStatus)
+      setMemory(nextMemory)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -68,12 +73,13 @@ export default function JarvisPage() {
     }
   }, [payloadText])
 
-  const speak = async (text: string) => {
+  const speak = async (text: string, speed = 1) => {
     setVoiceBusy('speaking')
     try {
       const audio = await api.speakText(text)
       await new Promise<void>((resolve, reject) => {
         const player = new Audio(audio.data_url)
+        player.playbackRate = speed
         player.onended = () => resolve()
         player.onerror = () => reject(new Error('Audio konnte nicht abgespielt werden.'))
         void player.play().catch(reject)
@@ -85,8 +91,10 @@ export default function JarvisPage() {
     }
   }
 
-  const run = async (mode: 'plan' | 'run') => {
-    if (!request.trim()) return showToast('Aufgabe fehlt.', 'error')
+  const run = async (mode: 'plan' | 'run', command?: { request: string; agentId: string }) => {
+    const activeRequest = command?.request ?? request
+    const activeAgent = command?.agentId ?? selectedAgent
+    if (!activeRequest.trim()) return showToast('Aufgabe fehlt.', 'error')
     if (!payload) return showToast('Payload ist kein JSON-Objekt.', 'error')
     setBusy(mode)
     setError('')
@@ -100,26 +108,28 @@ export default function JarvisPage() {
         max_prompt_tokens: status?.config.max_prompt_tokens ?? 4000,
         max_completion_tokens: status?.config.max_completion_tokens ?? 1200
       }
-      const body = { request, payload, limits }
+      const body = { request: activeRequest, payload, limits }
+      emit({ source: 'task', type: mode === 'run' ? 'TASK_STARTED' : 'TASK_PLANNED', status: 'started', payload: { agent: activeAgent } })
       const next =
-        selectedAgent === 'auto'
+        activeAgent === 'auto'
           ? mode === 'plan'
             ? await api.planJarvis(body)
             : await api.runJarvis(body)
           : ({
               schema: 'jarvis.multi_agent.v1',
               status: 'completed',
-              request,
+              request: activeRequest,
               limits,
-              parallel_groups: [[selectedAgent]],
+              parallel_groups: [[activeAgent]],
               tasks: [],
               handoff_policy: {},
               model_policy: {},
               safety: { external_writes: 'approval_required' },
               missing_integrations: [],
-              results: [await api.runJarvisAgent(selectedAgent, body)]
+              results: [await api.runJarvisAgent(activeAgent, body)]
             } as JarvisOrchestrationResponse)
       setResult(next)
+      emit({ source: 'task', type: 'TASK_COMPLETED', status: 'completed', payload: { status: next.status } })
       if (autoSpeak && next.consolidated?.summary) await speak(next.consolidated.summary)
       await refresh()
     } catch (err) {
@@ -129,10 +139,23 @@ export default function JarvisPage() {
     }
   }
 
+  const executeVoiceCommand = async (transcript: string) => {
+    const command = routeVoiceCommand(transcript)
+    if (!command) return
+    const matchingAgent = status?.agents.find(agent => agent.agent_id.toLowerCase().includes(command.agentHint))?.agent_id ?? 'auto'
+    setRequest(command.request)
+    setSelectedAgent(matchingAgent)
+    showToast(command.response, 'success')
+    emit({ source: 'voice', type: 'VOICE_COMMAND_ROUTED', status: 'completed', payload: { agent: matchingAgent } })
+    if (command.execute) await run('run', { request: command.request, agentId: matchingAgent })
+    else await refresh()
+  }
+
   const recordVoice = async () => {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined')
       return showToast('Browseraufnahme ist hier nicht verfügbar.', 'error')
     setVoiceBusy('recording')
+    emit({ source: 'voice', type: 'LISTENING_STARTED', status: 'started' })
     setError('')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -156,7 +179,9 @@ export default function JarvisPage() {
       const transcript = await api.transcribeAudio(await blobToDataUrl(blob), blob.type || 'audio/webm')
       if (transcript.transcript) {
         setRequest(transcript.transcript)
+        emit({ source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed', payload: { provider: transcript.provider ?? 'configured' } })
         showToast('Sprache erkannt.', 'success')
+        await executeVoiceCommand(transcript.transcript)
       } else {
         showToast('Keine Sprache erkannt.', 'error')
       }
@@ -191,6 +216,7 @@ export default function JarvisPage() {
       <Toast toast={toast} />
       <JarvisDashboard
         status={status}
+        memory={memory}
         loading={loading}
         busy={busy}
         selectedAgent={selectedAgent}

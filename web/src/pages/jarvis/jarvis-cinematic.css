@@ -1,0 +1,26 @@
+.jarvis-cinematic {
+  --jarvis-cyan: #67e8f9;
+  --jarvis-blue: #38bdf8;
+  position: relative;
+  isolation: isolate;
+}
+.jarvis-cinematic::before {
+  background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(103,232,249,.025) 3px 4px);
+  content: '';
+  inset: 0;
+  opacity: .6;
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+}
+.jarvis-glass { backdrop-filter: blur(18px); background: linear-gradient(135deg, rgba(8, 22, 38, .88), rgba(4, 12, 24, .72)); border: 1px solid rgba(103,232,249,.18); box-shadow: inset 0 1px rgba(255,255,255,.05), 0 22px 70px -48px rgba(34,211,238,.8); }
+.jarvis-glass::before { background: linear-gradient(125deg, rgba(255,255,255,.07), transparent 28%); content: ''; inset: 0; pointer-events: none; position: absolute; }
+.jarvis-glass { position: relative; }
+.jarvis-nav-button { border: 1px solid rgba(148,163,184,.2); color: #94a3b8; transition: border-color .2s ease, background .2s ease, color .2s ease; }
+.jarvis-nav-button:hover { background: rgba(34,211,238,.08); border-color: rgba(103,232,249,.55); color: #cffafe; }
+@keyframes jarvis-radar { to { transform: rotate(360deg); } }
+@keyframes jarvis-scan { from { transform: translateY(-100%); } to { transform: translateY(500%); } }
+.jarvis-radar { animation: jarvis-radar 20s linear infinite; transform-origin: center; }
+.jarvis-scanline { animation: jarvis-scan 9s linear infinite; background: linear-gradient(transparent, rgba(103,232,249,.14), transparent); height: 20%; left: 0; pointer-events: none; position: absolute; right: 0; top: 0; }
+.jarvis-cinematic::after { background-image: radial-gradient(rgba(103,232,249,.16) .55px, transparent .55px); background-size: 18px 18px; content: ''; inset: 0; mask-image: radial-gradient(circle at 50% 0, black, transparent 72%); opacity: .12; pointer-events: none; position: fixed; z-index: -1; }
+@media (prefers-reduced-motion: reduce) { .jarvis-radar, .jarvis-scanline { animation: none; } }

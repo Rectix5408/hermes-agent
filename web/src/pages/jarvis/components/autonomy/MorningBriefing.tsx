@@ -1,0 +1,5 @@
+import { Coffee } from 'lucide-react'
+import type { JarvisStatusResponse, MemoryStatus } from '@/lib/api'
+import { buildMorningBriefing } from '../../cinematic/morning-briefing'
+
+export function MorningBriefing({ status, memory }: { status: JarvisStatusResponse | null; memory: MemoryStatus | null }) { const items = buildMorningBriefing(status, memory); return <section className="jarvis-glass p-5"><p className="flex items-center gap-2 text-xs uppercase tracking-[.2em] text-cyan-300/80"><Coffee className="h-4 w-4" /> Morning Briefing</p><h2 className="mt-1 text-xl text-slate-100">Status ohne KI-Zusammenfassung</h2><p className="mt-2 text-sm text-slate-500">Alle Werte stammen aus den bereits geladenen Hermes-Statusdaten.</p><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{items.map(item => <article key={item.label} className="border border-white/10 bg-black/15 p-3"><p className="text-xs uppercase tracking-[.12em] text-slate-500">{item.label}</p><p className="mt-2 text-sm text-cyan-100">{item.value}</p><p className="mt-2 text-xs text-slate-500">{item.detail}</p></article>)}</div></section> }
