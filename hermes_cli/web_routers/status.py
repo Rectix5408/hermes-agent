@@ -692,6 +692,128 @@ async def get_learning_graph(profile: Optional[str] = None):
         raise HTTPException(status_code=500, detail="Failed to build learning graph")
 
 
+async def _memory_universe_read(profile: Optional[str], fn):
+    """Run a bounded metadata-only graph read under the requested profile scope."""
+    try:
+        return await scoped_to_thread(profile, fn)
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid memory universe request") from None
+    except LookupError:
+        # Do not reveal whether an opaque id exists in another profile.
+        raise HTTPException(status_code=404, detail="Memory universe resource not found") from None
+    except Exception:  # health: allow BLE001 -- authenticated API boundary logs internal failures and returns no graph details
+        _log.exception("Memory universe query failed")
+        raise HTTPException(status_code=500, detail="Memory universe is temporarily unavailable") from None
+
+
+def _memory_universe_text(value: Optional[str], *, maximum: int = 120) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if len(normalized) > maximum:
+        raise HTTPException(status_code=400, detail="Invalid memory universe request")
+    return normalized or None
+
+
+@router.get("/api/memory/universe/clusters")
+async def get_memory_universe_clusters(profile: Optional[str] = None):
+    """Top-level, redacted cluster projection for the active Hermes profile."""
+    from agent.memory_graph_projection import list_clusters
+    return await _memory_universe_read(profile, list_clusters)
+
+
+@router.get("/api/memory/universe/nodes")
+async def get_memory_universe_nodes(
+    cluster_id: Optional[str] = None,
+    kind: Optional[str] = None,
+    query: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    profile: Optional[str] = None,
+):
+    """Cursor-paginated, metadata-only nodes; memory text is never returned."""
+    from agent.memory_graph_projection import list_nodes
+    cluster_id = _memory_universe_text(cluster_id)
+    kind = _memory_universe_text(kind, maximum=24)
+    query = _memory_universe_text(query)
+    cursor = _memory_universe_text(cursor, maximum=1024)
+    return await _memory_universe_read(
+        profile,
+        lambda: list_nodes(cluster_id=cluster_id, kind=kind, query=query, limit=limit, cursor=cursor),
+    )
+
+
+@router.get("/api/memory/universe/search")
+async def search_memory_universe(
+    query: str,
+    kind: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    profile: Optional[str] = None,
+):
+    """Search safe labels and categories only; memory bodies are not indexed here."""
+    from agent.memory_graph_projection import list_nodes
+    query = _memory_universe_text(query)
+    if query is None:
+        raise HTTPException(status_code=400, detail="Invalid memory universe request")
+    kind = _memory_universe_text(kind, maximum=24)
+    cursor = _memory_universe_text(cursor, maximum=1024)
+    return await _memory_universe_read(
+        profile,
+        lambda: list_nodes(kind=kind, query=query, limit=limit, cursor=cursor),
+    )
+
+
+@router.get("/api/memory/universe/nodes/{node_id}/edges")
+async def get_memory_universe_edges(
+    node_id: str,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    profile: Optional[str] = None,
+):
+    """Cursor-paginated connections for one node in the current profile only."""
+    from agent.memory_graph_projection import list_edges
+    node_id = _memory_universe_text(node_id, maximum=128)
+    cursor = _memory_universe_text(cursor, maximum=1024)
+    if node_id is None:
+        raise HTTPException(status_code=400, detail="Invalid memory universe request")
+    return await _memory_universe_read(profile, lambda: list_edges(node_id=node_id, limit=limit, cursor=cursor))
+
+
+@router.get("/api/memory/universe/nodes/{node_id}/content")
+async def get_memory_universe_content(node_id: str, profile: Optional[str] = None):
+    """Explicit, authenticated detail read for one built-in memory node.
+
+    The global dashboard authentication middleware and ``scoped_to_thread``
+    provide the existing user/profile authorization boundary.  No graph
+    overview path includes this content.
+    """
+    from agent.memory_graph_projection import get_memory_content
+    node_id = _memory_universe_text(node_id, maximum=128)
+    if node_id is None:
+        raise HTTPException(status_code=400, detail="Invalid memory universe request")
+    return await _memory_universe_read(profile, lambda: get_memory_content(node_id))
+
+
+@router.get("/api/memory/universe/nodes/{node_id}")
+async def get_memory_universe_node(node_id: str, profile: Optional[str] = None):
+    """Safe metadata for one opaque graph node."""
+    from agent.memory_graph_projection import get_node
+    node_id = _memory_universe_text(node_id, maximum=128)
+    if node_id is None:
+        raise HTTPException(status_code=400, detail="Invalid memory universe request")
+    return await _memory_universe_read(profile, lambda: get_node(node_id))
+
+
+@router.get("/api/memory/universe/stats")
+async def get_memory_universe_stats(profile: Optional[str] = None):
+    """Counts only; suitable for a dashboard health/status panel."""
+    from agent.memory_graph_projection import get_stats
+    return await _memory_universe_read(profile, get_stats)
+
+
 async def _learning_mutation(profile: Optional[str], fn, status: int, fallback: str):
     """Run a learning_mutations call under ``_profile_scope`` off-loop; a non-ok result
     becomes ``HTTPException(status, message)``."""

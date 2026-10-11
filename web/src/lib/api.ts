@@ -1,8 +1,4 @@
-import {
-  buildHermesWebSocketUrl,
-  type ModelOptionProvider,
-  type ModelOptionsResult,
-} from "@hermes/shared";
+import { buildHermesWebSocketUrl, type ModelOptionProvider, type ModelOptionsResult } from "@hermes/shared";
 
 import type { AuxiliaryModelsResponse } from "./api-aux";
 import type {
@@ -11,8 +7,9 @@ import type {
   ManagedFileWriteResponse,
 } from "./api-files";
 import type { CronDeliveryTarget, CronJob } from "./api-cron";
-import { createJarvisApi } from "./api-jarvis";
+import { createJarvisDashboardApi } from "./api-jarvis";
 import type { AudioSpeakResponse, AudioTranscriptionResponse } from "./api-jarvis";
+import { pluginPath } from "./api-plugin-path";
 import { dashboardServingProfile } from "./profile-bootstrap";
 
 // The dashboard can be served either at the root of its host (e.g.
@@ -256,11 +253,6 @@ export async function fetchJSON<T>(
     throw err;
   }
   return res.json();
-}
-
-/** Encode a plugin registry key for URL paths (preserves `/` segment separators). */
-function pluginPath(name: string): string {
-  return name.split("/").map(encodeURIComponent).join("/");
 }
 
 /**
@@ -631,7 +623,7 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return fetchJSON<ModelOptionsResult>(`/api/model/options${suffix}`);
   },
-  ...createJarvisApi({ appendProfileParam, fetchJSON, getManagementProfile }),
+  ...createJarvisDashboardApi({ appendProfileParam, fetchJSON, getManagementProfile }),
   getAuxiliaryModels: (profile = getManagementProfile()) =>
     fetchJSON<AuxiliaryModelsResponse>(
       appendProfileParam("/api/model/auxiliary", profile),

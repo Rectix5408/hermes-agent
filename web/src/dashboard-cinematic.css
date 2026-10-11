@@ -1,0 +1,14 @@
+/* Visual-only premium treatment around existing routes and the real PTY chat. */
+.hermes-premium-shell { background: radial-gradient(circle at 55% -20%, rgb(14 116 144 / 24%), transparent 33rem), radial-gradient(circle at 100% 65%, rgb(8 47 73 / 25%), transparent 32rem), #020812; }
+.hermes-premium-shell::before { background-image: linear-gradient(rgb(103 232 249 / 3%) 1px, transparent 1px), linear-gradient(90deg, rgb(103 232 249 / 2%) 1px, transparent 1px); background-size: 3.5rem 3.5rem; content: ''; inset: 0; mask-image: linear-gradient(to bottom, black, transparent 76%); pointer-events: none; position: fixed; z-index: 0; }
+.hermes-premium-shell > * { position: relative; z-index: 1; }
+.hermes-premium-shell aside#app-sidebar { background: linear-gradient(180deg, rgb(5 18 32 / 96%), rgb(2 9 18 / 94%)) !important; border-color: rgb(56 189 248 / 22%) !important; box-shadow: 1.25rem 0 3.5rem -3rem rgb(14 165 233 / 80%); }
+.hermes-premium-shell aside#app-sidebar > div:first-child { border-color: rgb(56 189 248 / 20%); min-height: 4.7rem; }
+.hermes-premium-shell aside#app-sidebar [aria-current='page'] { background: linear-gradient(90deg, rgb(14 165 233 / 25%), rgb(14 165 233 / 7%)); border: 1px solid rgb(56 189 248 / 45%); border-radius: .65rem; box-shadow: inset 0 0 1.6rem rgb(14 165 233 / 10%), 0 0 1.7rem -1rem rgb(56 189 248 / 90%); }
+.hermes-premium-shell aside#app-sidebar nav a:hover { background: linear-gradient(90deg, rgb(14 165 233 / 14%), transparent); color: #e0f2fe; }
+.hermes-premium-shell [role='region'][aria-label='Chat terminal'] { border: 1px solid rgb(56 189 248 / 30%); border-radius: .8rem; box-shadow: inset 0 1px rgb(255 255 255 / 5%), 0 1.5rem 4rem -3.25rem rgb(14 165 233 / 85%); }
+.hermes-premium-shell #chat-side-panel > div, .hermes-premium-shell #chat-side-panel { background: linear-gradient(160deg, rgb(7 22 39 / 92%), rgb(2 9 18 / 88%)); border-color: rgb(56 189 248 / 20%); }
+.hermes-premium-shell button:focus-visible, .hermes-premium-shell a:focus-visible { outline: 2px solid #67e8f9; outline-offset: 3px; }
+@media (max-width: 1023px) { .hermes-premium-shell aside#app-sidebar { box-shadow: 1.25rem 0 3.5rem -1rem rgb(2 8 23 / 85%); } }
+@media (prefers-reduced-motion: no-preference) { .hermes-premium-shell aside#app-sidebar [aria-current='page'] { animation: hermes-nav-energy 4.5s ease-in-out infinite; } }
+@keyframes hermes-nav-energy { 50% { box-shadow: inset 0 0 1.8rem rgb(14 165 233 / 17%), 0 0 2rem -1rem rgb(56 189 248 / 100%); } }

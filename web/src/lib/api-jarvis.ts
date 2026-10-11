@@ -1,4 +1,5 @@
 import type { CronJob } from './api-cron'
+import { createMemoryUniverseApi } from './api-memory-universe'
 
 type FetchJSON = <T>(url: string, init?: RequestInit) => Promise<T>
 
@@ -199,4 +200,9 @@ export function createJarvisApi({ appendProfileParam, fetchJSON, getManagementPr
         }
       )
   }
+}
+
+/** Dashboard-only API extensions share the existing authenticated API facade. */
+export function createJarvisDashboardApi(dependencies: JarvisApiDependencies) {
+  return { ...createJarvisApi(dependencies), ...createMemoryUniverseApi(dependencies) }
 }
