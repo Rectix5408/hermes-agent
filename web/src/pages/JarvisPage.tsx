@@ -6,7 +6,8 @@ import { Toast } from '@nous-research/ui/ui/components/toast'
 import { useToast } from '@nous-research/ui/hooks/use-toast'
 import { api } from '@/lib/api'
 import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
-import { errorMessage } from '@/lib/api-error'
+import { ApiError, errorMessage } from '@/lib/api-error'
+import { useProfileScope } from '@/contexts/useProfileScope'
 import { usePageHeader } from '@/contexts/usePageHeader'
 import { JarvisShell } from './jarvis/JarvisShell'
 import { emit } from './jarvis/runtime/event-bus'
@@ -24,6 +25,11 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 export default function JarvisPage() {
+  const { profile } = useProfileScope()
+  return <ProfileWorkspace key={profile} profile={profile} />
+}
+
+function ProfileWorkspace({ profile }: { profile: string }) {
   const { setEnd, setTitle } = usePageHeader()
   const { toast, showToast } = useToast()
   const navigate = useNavigate()
@@ -32,8 +38,8 @@ export default function JarvisPage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<'plan' | 'run' | null>(null)
   const [selectedAgent, setSelectedAgent] = useState('auto')
-  const [request, setRequest] = useState('Plane meinen Tag, prüfe offene Aufgaben und bereite nötige Entwürfe vor.')
-  const [payloadText, setPayloadText] = useState('{\n  "topics": ["Jarvis", "Automatisierung"],\n  "tasks": []\n}')
+  const [request, setRequest] = useState('')
+  const [payloadText, setPayloadText] = useState('{}')
   const [result, setResult] = useState<JarvisOrchestrationResponse | null>(null)
   const [error, setError] = useState('')
   const [voiceBusy, setVoiceBusy] = useState<'recording' | 'transcribing' | 'thinking' | 'speaking' | null>(null)
@@ -42,25 +48,46 @@ export default function JarvisPage() {
   const [autoSpeak, setAutoSpeak] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const recordingTimerRef = useRef<number | null>(null)
+  const lifetime = useRef(new AbortController())
+  const refreshRequest = useRef<AbortController | null>(null)
+  const playerRef = useRef<HTMLAudioElement | null>(null)
   const setVoicePhase = (next: ProductionVoiceState) => setVoiceState(current => transitionVoiceState(current, next))
 
-  useEffect(() => () => {
-    if (recordingTimerRef.current) window.clearTimeout(recordingTimerRef.current)
-    if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop()
+  useEffect(() => {
+    lifetime.current = new AbortController()
+    return () => {
+      lifetime.current.abort()
+      refreshRequest.current?.abort()
+      playerRef.current?.pause()
+      if (recordingTimerRef.current) window.clearTimeout(recordingTimerRef.current)
+      recorderRef.current?.stream.getTracks().forEach(track => track.stop())
+      if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop()
+    }
   }, [])
 
   const refresh = useCallback(async () => {
+    if (lifetime.current.signal.aborted) return
+    refreshRequest.current?.abort()
+    const controller = new AbortController()
+    refreshRequest.current = controller
     setLoading(true)
+    setError('')
     try {
-      const [nextStatus, nextMemory] = await Promise.all([api.getJarvisStatus(), api.getMemory().catch(() => null)])
+      const [nextStatus, nextMemory] = await Promise.all([api.getJarvisStatus(profile, controller.signal), api.getMemory(profile, controller.signal).catch(() => null)])
+      if (controller.signal.aborted) return
       setStatus(nextStatus)
       setMemory(nextMemory)
     } catch (err) {
-      setError(errorMessage(err))
+      if (controller.signal.aborted) return
+      setStatus(null)
+      setMemory(null)
+      setError(err instanceof ApiError && [401, 403].includes(err.status)
+        ? 'Zugriff nicht erlaubt. Bitte Anmeldung und Profilberechtigung prüfen.'
+        : 'Hermes ist derzeit nicht erreichbar. Über Aktualisieren erneut verbinden.')
     } finally {
-      setLoading(false)
+      if (!controller.signal.aborted) setLoading(false)
     }
-  }, [])
+  }, [profile])
 
   useEffect(() => {
     setTitle('Jarvis')
@@ -86,12 +113,17 @@ export default function JarvisPage() {
   }, [payloadText])
 
   const speak = async (text: string, speed = 1) => {
+    const signal = lifetime.current.signal
+    if (signal.aborted) return
     setVoiceBusy('speaking')
     setVoicePhase('speaking')
     try {
-      const audio = await api.speakText(text)
+      const audio = await api.speakText(text, profile, signal)
+      if (signal.aborted) return
       await new Promise<void>((resolve, reject) => {
         const player = new Audio(audio.data_url)
+        playerRef.current = player
+        signal.addEventListener('abort', () => { player.pause(); resolve() }, { once: true })
         player.playbackRate = speed
         player.onended = () => resolve()
         player.onerror = () => reject(new Error('Audio konnte nicht abgespielt werden.'))
@@ -106,9 +138,10 @@ export default function JarvisPage() {
     }
   }
 
-  const run = async (mode: 'plan' | 'run', command?: { request: string; agentId: string }) => {
-    const activeRequest = command?.request ?? request
-    const activeAgent = command?.agentId ?? selectedAgent
+  const run = async (mode: 'plan' | 'run', command = { request, agentId: selectedAgent }) => {
+    const signal = lifetime.current.signal
+    if (signal.aborted || busy) return
+    const { request: activeRequest, agentId: activeAgent } = command
     if (!activeRequest.trim()) return showToast('Aufgabe fehlt.', 'error')
     if (!payload) return showToast('Payload ist kein JSON-Objekt.', 'error')
     setBusy(mode)
@@ -124,12 +157,12 @@ export default function JarvisPage() {
         max_completion_tokens: status?.config.max_completion_tokens ?? 1200
       }
       const body = { request: activeRequest, payload, limits }
-      emit({ source: 'task', type: mode === 'run' ? 'TASK_STARTED' : 'TASK_PLANNED', status: 'started', payload: { agent: activeAgent } })
+      emit({ profile, source: 'task', type: mode === 'run' ? 'TASK_STARTED' : 'TASK_PLANNED', status: 'started', payload: { agent: activeAgent } })
       const next =
-        activeAgent === 'auto'
-          ? mode === 'plan'
-            ? await api.planJarvis(body)
-            : await api.runJarvis(body)
+        mode === 'plan'
+          ? await api.planJarvis(body, profile, signal)
+          : activeAgent === 'auto'
+            ? await api.runJarvis(body, profile, signal)
           : ({
               schema: 'jarvis.multi_agent.v1',
               status: 'completed',
@@ -141,10 +174,11 @@ export default function JarvisPage() {
               model_policy: {},
               safety: { external_writes: 'approval_required' },
               missing_integrations: [],
-              results: [await api.runJarvisAgent(activeAgent, body)]
+              results: [await api.runJarvisAgent(activeAgent, body, profile, signal)]
             } as JarvisOrchestrationResponse)
+      if (signal.aborted) return
       setResult(next)
-      emit({ source: 'task', type: 'TASK_COMPLETED', status: 'completed', payload: { status: next.status } })
+      emit({ profile, source: 'task', type: 'TASK_COMPLETED', status: 'completed', payload: { status: next.status } })
       if (autoSpeak && next.consolidated?.summary) await speak(next.consolidated.summary)
       await refresh()
     } catch (err) {
@@ -163,7 +197,7 @@ export default function JarvisPage() {
     setRequest(command.request)
     setSelectedAgent(matchingAgent)
     showToast(command.response, 'success')
-    emit({ source: 'voice', type: 'VOICE_COMMAND_ROUTED', status: 'completed', payload: { agent: matchingAgent } })
+    emit({ profile, source: 'voice', type: 'VOICE_COMMAND_ROUTED', status: 'completed', payload: { agent: matchingAgent } })
     if (command.execute) { setVoiceBusy('thinking'); setVoicePhase('thinking'); await run('run', { request: command.request, agentId: matchingAgent }) }
     else await refresh()
     return command.response
@@ -178,14 +212,17 @@ export default function JarvisPage() {
   }
 
   const recordVoice = async () => {
+    const signal = lifetime.current.signal
+    if (signal.aborted || voiceBusy) return
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined')
       return showToast('Browseraufnahme ist hier nicht verfügbar.', 'error')
     setVoiceBusy('recording')
     setVoicePhase('listening')
-    emit({ source: 'voice', type: 'LISTENING_STARTED', status: 'started' })
+    emit({ profile, source: 'voice', type: 'LISTENING_STARTED', status: 'started' })
     setError('')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (signal.aborted) { stream.getTracks().forEach(track => track.stop()); return }
       const recorder = new MediaRecorder(stream)
       recorderRef.current = recorder
       const chunks: Blob[] = []
@@ -206,11 +243,15 @@ export default function JarvisPage() {
         if (recorder.state !== 'inactive') recorder.stop()
       }, 60_000)
       const blob = await stopped
+      if (signal.aborted) return
       setVoiceBusy('transcribing')
       setVoicePhase('processing')
-      const transcript = await api.transcribeAudio(await blobToDataUrl(blob), blob.type || 'audio/webm')
+      const data = await blobToDataUrl(blob)
+      if (signal.aborted) return
+      const transcript = await api.transcribeAudio(data, blob.type || 'audio/webm', profile, signal)
+      if (signal.aborted) return
       if (transcript.transcript) {
-        emit({ source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed', payload: { provider: transcript.provider ?? 'configured' } })
+        emit({ profile, source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed', payload: { provider: transcript.provider ?? 'configured' } })
         showToast('Sprache erkannt.', 'success')
         await processVoiceTranscript(transcript.transcript)
       } else {
@@ -231,7 +272,8 @@ export default function JarvisPage() {
 
   const decideApproval = async (id: string, decision: 'approve' | 'deny') => {
     try {
-      await api.decideJarvisApproval(id, decision)
+      await api.decideJarvisApproval(id, decision, profile, lifetime.current.signal)
+      if (lifetime.current.signal.aborted) return
       await refresh()
       showToast(decision === 'approve' ? 'Freigabe markiert.' : 'Freigabe abgelehnt.', 'success')
     } catch (err) {
@@ -240,7 +282,8 @@ export default function JarvisPage() {
   }
   const saveRoutingMode = async (mode: string) => {
     try {
-      const saved = await api.updateJarvisSettings({ 'jarvis.routing_mode': mode })
+      const saved = await api.updateJarvisSettings({ 'jarvis.routing_mode': mode }, profile, lifetime.current.signal)
+      if (lifetime.current.signal.aborted) return
       setStatus(previous => (previous ? { ...previous, config: saved.config } : previous))
       showToast('Routingmodus gespeichert.', 'success')
     } catch (err) {

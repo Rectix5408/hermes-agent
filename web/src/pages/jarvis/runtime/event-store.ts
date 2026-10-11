@@ -1,4 +1,5 @@
-import { useSyncExternalStore } from 'react'
+import { useMemo, useSyncExternalStore } from 'react'
+import { useProfileScope } from '@/contexts/useProfileScope'
 import { emit, getHistory, subscribe } from './event-bus'
 import type { JarvisRuntimeEvent } from './event-types'
 
@@ -6,7 +7,15 @@ let snapshot = getHistory()
 const subscriptions = new Set<() => void>()
 subscribe(() => { snapshot = getHistory(); subscriptions.forEach(notify => notify()) })
 
-export function useRuntimeEvents(): JarvisRuntimeEvent[] { return useSyncExternalStore(listener => { subscriptions.add(listener); return () => subscriptions.delete(listener) }, () => snapshot, () => []) }
+const empty: JarvisRuntimeEvent[] = []
+export function useRuntimeEvents(): JarvisRuntimeEvent[] {
+  const { profile } = useProfileScope()
+  const events = useSyncExternalStore(listener => {
+    subscriptions.add(listener)
+    return () => subscriptions.delete(listener)
+  }, () => snapshot, () => empty)
+  return useMemo(() => events.filter(event => event.profile === profile), [events, profile])
+}
 
 let seeded = false
 export function seedRuntimeEvents(): void {

@@ -39,11 +39,11 @@ export function liveAgents(status: JarvisStatusResponse | null, busy: boolean, r
 export function memoryTelemetry(memory: MemoryStatus | null) {
   if (!memory) return { state: 'Nicht verfügbar', active: 0, stored: '—', lastAccess: '—' }
   const active = memory.providers.filter(provider => provider.configured || provider.status === 'ready').length
-  const files = memory.builtin_files.memory + memory.builtin_files.user
+  const bytes = memory.builtin_files.memory + memory.builtin_files.user
   return {
     state: memory.active || 'Nicht konfiguriert',
     active,
-    stored: `${files} lokale Dateien`,
+    stored: `${bytes.toLocaleString('de-DE')} Byte lokaler Speicher`,
     lastAccess: 'Vom bestehenden Memory-Endpunkt nicht geliefert'
   }
 }

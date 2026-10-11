@@ -3,6 +3,8 @@ export type JarvisRuntimeStatus = 'started' | 'running' | 'completed' | 'failed'
 
 export interface JarvisRuntimeEvent {
   id: string
+  /** Owning profile; unbound/demo events are not shown in production workspaces. */
+  profile?: string
   timestamp: string
   source: JarvisRuntimeSource
   type: string

@@ -157,44 +157,49 @@ export interface AudioSpeakResponse {
 
 export function createJarvisApi({ appendProfileParam, fetchJSON, getManagementProfile }: JarvisApiDependencies) {
   return {
-    getJarvisStatus: (profile = getManagementProfile()) =>
-      fetchJSON<JarvisStatusResponse>(appendProfileParam('/api/jarvis/status', profile)),
+    getJarvisStatus: (profile = getManagementProfile(), signal?: AbortSignal) =>
+      fetchJSON<JarvisStatusResponse>(appendProfileParam('/api/jarvis/status', profile), { signal }),
     getJarvisApprovals: (profile = getManagementProfile()) =>
       fetchJSON<JarvisApprovalsResponse>(appendProfileParam('/api/jarvis/approvals', profile)),
-    decideJarvisApproval: (approvalId: string, decision: 'approve' | 'deny', profile = getManagementProfile()) =>
+    decideJarvisApproval: (approvalId: string, decision: 'approve' | 'deny', profile = getManagementProfile(), signal?: AbortSignal) =>
       fetchJSON<{ ok: boolean; approval: JarvisApprovalRecord; executed: boolean }>(
         appendProfileParam(`/api/jarvis/approvals/${encodeURIComponent(approvalId)}`, profile),
         {
           method: 'POST',
+          signal,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ decision })
         }
       ),
-    updateJarvisSettings: (settings: Record<string, unknown>, profile = getManagementProfile()) =>
+    updateJarvisSettings: (settings: Record<string, unknown>, profile = getManagementProfile(), signal?: AbortSignal) =>
       fetchJSON<{ ok: boolean; config: Record<string, unknown> }>(appendProfileParam('/api/jarvis/settings', profile), {
         method: 'PUT',
+        signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings })
       }),
     getJarvisRuns: (limit = 20, profile = getManagementProfile()) =>
       fetchJSON<JarvisRunsResponse>(appendProfileParam(`/api/jarvis/runs?limit=${limit}`, profile)),
-    planJarvis: (body: JarvisOrchestrationRequest, profile = getManagementProfile()) =>
+    planJarvis: (body: JarvisOrchestrationRequest, profile = getManagementProfile(), signal?: AbortSignal) =>
       fetchJSON<JarvisOrchestrationResponse>(appendProfileParam('/api/jarvis/orchestrator/plan', profile), {
         method: 'POST',
+        signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       }),
-    runJarvis: (body: JarvisOrchestrationRequest, profile = getManagementProfile()) =>
+    runJarvis: (body: JarvisOrchestrationRequest, profile = getManagementProfile(), signal?: AbortSignal) =>
       fetchJSON<JarvisOrchestrationResponse>(appendProfileParam('/api/jarvis/orchestrator/run', profile), {
         method: 'POST',
+        signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       }),
-    runJarvisAgent: (agentId: string, body: JarvisOrchestrationRequest, profile = getManagementProfile()) =>
+    runJarvisAgent: (agentId: string, body: JarvisOrchestrationRequest, profile = getManagementProfile(), signal?: AbortSignal) =>
       fetchJSON<JarvisAgentResult>(
         appendProfileParam(`/api/jarvis/orchestrator/agent/${encodeURIComponent(agentId)}`, profile),
         {
           method: 'POST',
+          signal,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         }
@@ -204,5 +209,34 @@ export function createJarvisApi({ appendProfileParam, fetchJSON, getManagementPr
 
 /** Dashboard-only API extensions share the existing authenticated API facade. */
 export function createJarvisDashboardApi(dependencies: JarvisApiDependencies) {
-  return { ...createJarvisApi(dependencies), ...createMemoryUniverseApi(dependencies) }
+  const { fetchJSON, appendProfileParam, getManagementProfile } = dependencies
+  return {
+    ...createJarvisApi(dependencies),
+    ...createMemoryUniverseApi(dependencies),
+    transcribeAudio: (
+      data_url: string,
+      mime_type?: string,
+      profile = getManagementProfile(),
+      signal?: AbortSignal,
+    ) =>
+      fetchJSON<AudioTranscriptionResponse>(
+        appendProfileParam("/api/audio/transcribe", profile),
+        {
+          signal,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data_url, mime_type }),
+        },
+      ),
+    speakText: (text: string, profile = getManagementProfile(), signal?: AbortSignal) =>
+      fetchJSON<AudioSpeakResponse>(
+        appendProfileParam("/api/audio/speak", profile),
+        {
+          signal,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      ),
+  }
 }

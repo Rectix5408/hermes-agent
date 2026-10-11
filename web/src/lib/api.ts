@@ -8,7 +8,6 @@ import type {
 } from "./api-files";
 import type { CronDeliveryTarget, CronJob } from "./api-cron";
 import { createJarvisDashboardApi } from "./api-jarvis";
-import type { AudioSpeakResponse, AudioTranscriptionResponse } from "./api-jarvis";
 import { pluginPath } from "./api-plugin-path";
 import { dashboardServingProfile } from "./profile-bootstrap";
 
@@ -1283,7 +1282,8 @@ export const api = {
     ),
 
   // ── Admin: Memory provider ──────────────────────────────────────────
-  getMemory: () => fetchJSON<MemoryStatus>("/api/memory"),
+  getMemory: (profile = getManagementProfile(), signal?: AbortSignal) =>
+    fetchJSON<MemoryStatus>(appendProfileParam("/api/memory", profile), { signal }),
   getMemoryProviderConfig: (provider: string) =>
     fetchJSON<MemoryProviderConfig>(
       `/api/memory/providers/${encodeURIComponent(provider)}/config`,
@@ -1318,28 +1318,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target }),
     }),
-  transcribeAudio: (
-    data_url: string,
-    mime_type?: string,
-    profile = getManagementProfile(),
-  ) =>
-    fetchJSON<AudioTranscriptionResponse>(
-      appendProfileParam("/api/audio/transcribe", profile),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data_url, mime_type }),
-      },
-    ),
-  speakText: (text: string, profile = getManagementProfile()) =>
-    fetchJSON<AudioSpeakResponse>(
-      appendProfileParam("/api/audio/speak", profile),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      },
-    ),
 
   // ── Admin: Gateway lifecycle ────────────────────────────────────────
   startGateway: () =>

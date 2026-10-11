@@ -1,11 +1,41 @@
-import { useState } from 'react'
-import { BrainCircuit } from 'lucide-react'
-import { useRuntimeEvents } from '../../runtime/event-store'
-import { CoreStatus } from './CoreStatus'
-import { DataFlowParticles } from './DataFlowParticles'
+import { Bot, BrainCircuit, Mic, Wrench } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { HologramBrain } from './HologramBrain'
-import { NeuralNetwork } from './NeuralNetwork'
-import { SystemOrbit } from './SystemOrbit'
 import { VisualControls, type VisualMode } from './VisualControls'
 import type { JarvisVisualProps } from '../../types'
-export function JarvisCore({ status, voiceBusy }: Pick<JarvisVisualProps, 'status' | 'voiceBusy'>) { const [mode, setMode] = useState<VisualMode>('focus'); const events = useRuntimeEvents(); const latest = events[0]; const active = Boolean(voiceBusy) || events.some(event => event.status === 'running' || event.status === 'started'); return <section className="jarvis-glass relative overflow-hidden p-5"><div className="absolute inset-0 bg-[linear-gradient(120deg,rgba(8,145,178,.12),transparent_35%,rgba(139,92,246,.08))]" /><DataFlowParticles active={active} /><div className="relative flex flex-wrap items-end justify-between gap-4"><div><p className="flex items-center gap-2 text-xs uppercase tracking-[.24em] text-cyan-300/80"><BrainCircuit className="h-4 w-4" /> Jarvis Core</p><h2 className="mt-1 text-2xl font-medium text-slate-100">Holographic Intelligence Center</h2><p className="mt-1 text-sm text-slate-500">{voiceBusy ? `Voice Reactor · ${voiceBusy}` : latest ? `${latest.source} · ${latest.type.replaceAll('_', ' ')}` : status?.ok ? 'System online · awaiting intelligence event' : 'Runtime connection waiting'}</p></div><VisualControls mode={mode} onChange={setMode} /></div><div className="relative mt-5 grid items-center gap-5 lg:grid-cols-3">{mode !== 'system' && <HologramBrain active={active} />}{mode !== 'minimal' && <NeuralNetwork event={latest} />}{mode !== 'neural' && <SystemOrbit active={active} />}</div><div className="relative mt-5"><CoreStatus eventCount={events.length} online={Boolean(status?.ok)} agents={status?.agents.length ?? 0} tasks={status?.runs.length ?? 0} memoryReady={Boolean(status?.skill.available)} /></div></section> }
+
+interface JarvisCoreProps extends Pick<JarvisVisualProps, 'status' | 'voiceBusy'> {
+  busy?: JarvisVisualProps['busy']
+  onNavigate?: (path: string) => void
+}
+const systems = [
+  { label: 'Memory', icon: BrainCircuit, path: '/jarvis/memory' },
+  { label: 'Voice', icon: Mic, path: '/jarvis/voice' },
+  { label: 'Agents', icon: Bot, path: '/jarvis/agents' },
+  { label: 'Tools', icon: Wrench, path: '/jarvis/security' },
+]
+
+export function JarvisCore({ status, voiceBusy, busy, onNavigate }: JarvisCoreProps) {
+  const [mode, setMode] = useState<VisualMode>('focus')
+  const core = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const element = core.current
+    if (!element || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver(([entry]) => { element.dataset.visible = String(entry.isIntersecting) })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+  const state = voiceBusy === 'recording' ? 'LISTENING' : voiceBusy === 'speaking' ? 'SPEAKING' : voiceBusy === 'thinking' || busy === 'plan' ? 'THINKING' : voiceBusy || busy ? 'PROCESSING' : status?.ok ? 'ONLINE' : 'OFFLINE'
+  const active = Boolean(voiceBusy || busy)
+  return <section ref={core} className="command-panel command-core" aria-label="Jarvis Core" data-state={state} data-mode={mode}>
+    <header><p className="command-eyebrow">Central intelligence</p><span className="command-chip" role="status">{state}</span></header>
+    <div className="command-core-scene">
+      <div className="command-core-grid" aria-hidden="true" />
+      <HologramBrain active={active} />
+      <div className="command-core-name"><strong>HERMES</strong><span>Personal Intelligence</span></div>
+      <div className="command-core-systems">{systems.map(({ label, icon: Icon, path }) => <button key={label} onClick={() => onNavigate?.(path)} disabled={!onNavigate}><Icon size={20} /><span>{label}</span></button>)}</div>
+    </div>
+    <footer><span className="command-signal" />{active ? 'Aktuelle Benutzeraktion · kein interner Gedankenstrom' : 'Bereit für deine nächste Idee · dekorative Visualisierung'}</footer>
+    <div className="command-core-controls"><VisualControls mode={mode} onChange={setMode} /></div>
+  </section>
+}
