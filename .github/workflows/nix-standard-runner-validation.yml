@@ -1,0 +1,78 @@
+name: Nix standard runner validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-standard-runner-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake-check:
+    name: nix flake check on standard runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - name: Record runner capacity
+        run: |
+          set -euo pipefail
+          echo "### Runner capacity" >> "$GITHUB_STEP_SUMMARY"
+          nproc | tee -a "$GITHUB_STEP_SUMMARY"
+          free -h | tee -a "$GITHUB_STEP_SUMMARY"
+          df -h / | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            fallback = true
+            tarball-ttl = 3600
+
+      - name: Restore the Nix store without saving cache data
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'nix/**', 'pyproject.toml', 'uv.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          save: false
+          purge: false
+
+      - name: Run all Nix checks with resource telemetry
+        run: |
+          set -euo pipefail
+          resources="$RUNNER_TEMP/nix-standard-runner-resources.tsv"
+          printf 'timestamp,mem_available_mb,root_available_kb\n' > "$resources"
+          sample_resources() {
+            while true; do
+              printf '%s,%s,%s\n' \
+                "$(date -u +%FT%TZ)" \
+                "$(free -m | awk '/^Mem:/ {print $7}')" \
+                "$(df -Pk / | awk 'NR == 2 {print $4}')" >> "$resources"
+              sleep 30
+            done
+          }
+          sample_resources &
+          sampler_pid=$!
+          finish() {
+            kill "$sampler_pid" 2>/dev/null || true
+            wait "$sampler_pid" 2>/dev/null || true
+            echo "### Nix standard-runner resources" >> "$GITHUB_STEP_SUMMARY"
+            echo 'Final capacity:' >> "$GITHUB_STEP_SUMMARY"
+            free -h >> "$GITHUB_STEP_SUMMARY"
+            df -h / >> "$GITHUB_STEP_SUMMARY"
+            echo 'Samples:' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 120 "$resources" >> "$GITHUB_STEP_SUMMARY"
+          }
+          trap finish EXIT
+
+          check_count="$(nix eval --raw '.#checks.x86_64-linux' --apply 'checks: builtins.toString (builtins.length (builtins.attrNames checks))')"
+          test "$check_count" -gt 0
+          echo "Checking $check_count Nix outputs with at most two parallel builds."
+          /usr/bin/time -v nix flake check . --print-build-logs --max-jobs 2 --cores 2
