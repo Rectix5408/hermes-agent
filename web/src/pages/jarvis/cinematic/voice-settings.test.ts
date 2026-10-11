@@ -19,5 +19,7 @@ describe('profile voice preferences', () => {
     expect(applyVoiceSpeedCommand('Sprich langsamer', 'A')?.speed).toBe(1.08)
     expect(applyVoiceSpeedCommand('Der schnellere Zug fährt langsamer', 'A')).toBeNull()
     expect(loadVoiceSettings('B').speed).toBe(.95)
+    expect(applyVoiceSpeedCommand('Jarvis, benutze deine normale Stimme.', 'A')?.speed).toBe(.95)
+    expect(applyVoiceSpeedCommand('Benutze deine normale Stimme und sende die Mail', 'A')).toBeNull()
   })
 })

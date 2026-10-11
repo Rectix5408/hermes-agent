@@ -15,6 +15,8 @@ const mocked = vi.hoisted(() => ({
   setEnd: vi.fn(), setTitle: vi.fn(), showToast: vi.fn(), transcribeAudio: vi.fn(),
   captureMicrophone: vi.fn(), decideJarvisApproval: vi.fn(),
 }))
+const gateway = vi.hoisted(() => ({ connect: vi.fn(), request: vi.fn(), close: vi.fn(), onAny: vi.fn(), onRequest: vi.fn(), onState: vi.fn() }))
+vi.mock('@/lib/gatewayClient', () => ({ GatewayClient: class { constructor() { return gateway } } }))
 vi.mock('@/lib/api', () => ({ api: mocked }))
 vi.mock('./jarvis/voice-runtime/microphone', () => ({ captureMicrophone: mocked.captureMicrophone, captureBrowserSpeech: vi.fn() }))
 vi.mock('@/contexts/usePageHeader', () => ({ usePageHeader: () => mocked }))
@@ -35,11 +37,51 @@ beforeEach(() => {
   mocked.getJarvisStatus.mockResolvedValue(status)
   mocked.getMemory.mockResolvedValue(null)
   mocked.planJarvis.mockResolvedValue({ status: 'planned' })
+  gateway.connect.mockResolvedValue(undefined)
+  gateway.request.mockImplementation(async (method: string) => method === 'session.create' ? { session_id: 'voice-A', stored_session_id: 'stored-A' } : { status: 'streaming' })
+  gateway.onAny.mockReturnValue(vi.fn())
+  gateway.onRequest.mockReturnValue(vi.fn())
+  gateway.onState.mockReturnValue(vi.fn())
   host = document.createElement('div'); document.body.append(host); root = createRoot(host)
 })
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals() })
 
 describe('Jarvis session boundary', () => {
+  it('streams native dialogue, reuses the voice session and never routes it to the task planner', async () => {
+    await render('A')
+    let turn!: unknown
+    act(() => { turn = seam.props!.onVoiceTranscript('Kann ich normal mit dir reden?') })
+    await act(async () => { await Promise.resolve() })
+    const emit = gateway.onAny.mock.calls.at(-1)![0]
+    await act(async () => emit({ type: 'message.delta', session_id: 'voice-A', payload: { text: 'Hallo' } }))
+    expect(seam.props!.voiceResponse).toBe('Hallo')
+    expect(seam.props!.voiceState).toBe('thinking')
+    await act(async () => { emit({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Hallo zusammen', status: 'complete' } }); await turn })
+    expect(seam.props!.voiceResponse).toBe('Hallo zusammen')
+    expect(mocked.planJarvis).not.toHaveBeenCalled()
+    expect(mocked.runJarvis).not.toHaveBeenCalled()
+    act(() => { turn = seam.props!.onVoiceTranscript('Erzähl weiter') })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { gateway.onAny.mock.calls.at(-1)![0]({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Gerne' } }); await turn })
+    expect(gateway.request.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+    expect(seam.props!.voiceHistory).toHaveLength(2)
+  })
+  it('binds native approvals to the voice turn, refuses double input and clears it on profile change', async () => {
+    await render('A')
+    act(() => { void seam.props!.onVoiceTranscript('Bitte einen Entwurf erstellen') })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => seam.props!.onVoiceTranscript('zweiter Klick'))
+    const respond = vi.fn()
+    await act(async () => gateway.onRequest.mock.calls.at(-1)![0]({ id: 'approval-A', method: 'approval', params: { session_id: 'voice-A', choices: ['once', 'deny'] }, respond, fail: vi.fn() }))
+    expect(seam.props!.voiceApproval?.id).toBe('approval-A')
+    expect(respond).not.toHaveBeenCalled()
+    expect(gateway.request.mock.calls.filter(([method]) => method === 'prompt.submit')).toHaveLength(1)
+    await render('B')
+    expect(respond).toHaveBeenCalledWith({ choice: 'deny' })
+    expect(seam.props!.voiceApproval).toBeNull()
+    expect(seam.props!.voiceResponse).toBe('')
+    expect(gateway.close).toHaveBeenCalled()
+  })
   it('aborts profile A reads, resets drafts, and ignores late responses after B is selected', async () => {
     let finish!: (value: JarvisStatusResponse) => void
     mocked.getJarvisStatus.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))

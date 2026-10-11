@@ -1,13 +1,23 @@
 """Jarvis dashboard routes.
 
-Thin, authenticated dashboard endpoints around the skill-local Jarvis helper.
+Dashboard endpoints around the skill-local Jarvis helper.
+
+Authentication and per-profile authorization must be enforced by the hosting
+application; this module does not define those guards.
+
 They expose plans, safe local orchestration runs, and real availability status;
+
 external writes stay with the existing Hermes approval/tooling paths.
+
 """
-
 from __future__ import annotations
-
 import asyncio
+import os
+import tempfile
+import fcntl
+import uuid
+from collections import deque
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -17,9 +27,10 @@ from functools import lru_cache
 from pathlib import Path
 from time import time
 from typing import Any, Optional
-
 from fastapi import APIRouter, HTTPException
-
+from pydantic import BaseModel, Field
+from typing import Literal
+from hermes_cli.jarvis_dialogue import JarvisIntentRouter
 from agent.jarvis_execution import persist_execution_receipt, tool_execution_receipt
 from hermes_cli.config import atomic_config_write, get_config_path, load_config, load_env
 from hermes_constants import get_hermes_home
@@ -31,9 +42,9 @@ from hermes_cli.web_models import (
     JarvisSettingsUpdate,
 )
 from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK, _config_profile_scope
-
 router = APIRouter()
-
+_MAX_RUN_HISTORY = 100
+_MAX_APPROVAL_HISTORY = 200
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _JARVIS_SKILL_DIR = _PROJECT_ROOT / "skills" / "productivity" / "jarvis-assistant"
 _ORCHESTRATOR_PATH = _JARVIS_SKILL_DIR / "scripts" / "jarvis_multi_agent.py"
@@ -175,7 +186,6 @@ def _integration_status(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 def _jarvis_cron_jobs(profile: Optional[str]) -> list[dict[str, Any]]:
     try:
         from hermes_cli.web_routers.cron import _list_cron_jobs_sync
-
         jobs = _list_cron_jobs_sync(profile or "all")
     except Exception:
         logging.exception("Jarvis cron status is unavailable")
@@ -193,20 +203,18 @@ def _jarvis_cron_jobs(profile: Optional[str]) -> list[dict[str, Any]]:
 def _model_inventory(profile: Optional[str]) -> dict[str, Any]:
     try:
         from hermes_cli.inventory import build_model_options_payload, load_picker_context
-
         with _config_profile_scope(profile):
             payload = build_model_options_payload(
                 load_picker_context(), include_unconfigured=True, explicit_only=False, refresh=False)
-    except Exception as exc:
+    except Exception:
         logging.exception("Jarvis model inventory is unavailable")
         return {
             "available": False,
-            "error": str(exc),
+            "error": "Model inventory temporarily unavailable",
             "local": [],
             "cloud": [],
             "note": "Model inventory could not be read; no provider call was forced by Jarvis.",
         }
-
     local_rows = []
     cloud_rows = []
     for row in payload.get("providers", []):
@@ -246,24 +254,59 @@ def _approvals_path() -> Path:
     return Path(get_hermes_home()) / "jarvis" / "approvals.json"
 
 
+@contextmanager
+def _approval_file_lock():
+    """Serialize approval mutations between requests and server workers (POSIX)."""
+    lock_path = _approvals_path().with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # A separate lock inode survives atomic replacement of approvals.json.
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _load_approvals() -> list[dict[str, Any]]:
     path = _approvals_path()
-    if not path.is_file():
+    if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return data if isinstance(data, list) else []
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        # Never mistake corrupt storage for an empty queue and overwrite it.
+        logging.exception("Jarvis approval queue cannot be read")
+        raise RuntimeError("Jarvis approval queue unavailable") from exc
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise RuntimeError("Jarvis approval queue has invalid structure")
+    return data
 
 
 def _save_approvals(items: list[dict[str, Any]]) -> None:
+    """Commit approval state atomically. Caller must hold _approval_file_lock."""
     path = _approvals_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(items, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    serialized = json.dumps(items, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    tmp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=".approvals-", suffix=".tmp", delete=False,
+        ) as handle:
+            tmp_name = handle.name
+            os.chmod(tmp_name, 0o600)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name is not None and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
 
 def _approval_hash(item: dict[str, Any]) -> str:
+    """Digest the stored approval subject, not its mutable status metadata."""
     payload = {
         "action": item.get("action"),
         "reason": item.get("reason"),
@@ -275,41 +318,67 @@ def _approval_hash(item: dict[str, Any]) -> str:
 
 
 def _enqueue_approvals(output: dict[str, Any]) -> list[dict[str, Any]]:
-    approvals = output.get("consolidated", {}).get("approval_required")
+    consolidated = output.get("consolidated") or {}
+    approvals = consolidated.get("approval_required") if isinstance(consolidated, dict) else None
     if approvals is None:
         approvals = []
-        for result in output.get("results", []):
+        for result in output.get("results", []) or []:
             if isinstance(result, dict):
                 for item in result.get("approval_required", []) or []:
                     if isinstance(item, dict):
                         approvals.append({**item, "agent_id": result.get("agent_id")})
-    if not approvals:
+    if not isinstance(approvals, list) or not approvals:
         return []
-
-    queue = _load_approvals()
-    existing = {item.get("params_hash") for item in queue if item.get("status") == "pending"}
-    created = []
-    for item in approvals:
-        if not isinstance(item, dict):
-            continue
-        record = {
-            "id": hashlib.sha256(f"{time()}:{json.dumps(item, sort_keys=True, default=str)}".encode("utf-8")).hexdigest()[:16],
-            "created_at": time(),
-            "status": "pending",
-            "action": str(item.get("action") or "external_action"),
-            "reason": str(item.get("reason") or "External effect requires approval."),
-            "agent_id": str(item.get("agent_id") or ""),
-            "items": item.get("items") if isinstance(item.get("items"), list) else [],
+    created: list[dict[str, Any]] = []
+    with _approval_file_lock():
+        queue = _load_approvals()
+        existing = {
+            item.get("params_hash") for item in queue if item.get("status") == "pending"
         }
-        record["params_hash"] = _approval_hash(record)
-        if record["params_hash"] in existing:
-            continue
-        existing.add(record["params_hash"])
-        queue.append(record)
-        created.append(record)
-    if created:
-        _save_approvals(queue[-200:])
+        for item in approvals:
+            if not isinstance(item, dict):
+                continue
+            record = {
+                "id": uuid.uuid4().hex[:16],
+                "created_at": time(),
+                "status": "pending",
+                "action": str(item.get("action") or "external_action"),
+                "reason": str(item.get("reason") or "External effect requires approval."),
+                "agent_id": str(item.get("agent_id") or ""),
+                "items": item.get("items") if isinstance(item.get("items"), list) else [],
+            }
+            record["params_hash"] = _approval_hash(record)
+            if record["params_hash"] in existing:
+                continue
+            existing.add(record["params_hash"])
+            queue.append(record)
+            created.append(record)
+        if created:
+            # Keep every unresolved decision. Only resolved history may be trimmed.
+            pending = [row for row in queue if row.get("status") == "pending"]
+            resolved = [row for row in queue if row.get("status") != "pending"]
+            _save_approvals(pending + resolved[-_MAX_APPROVAL_HISTORY:])
     return created
+
+
+def _decide_approval_record(approval_id: str, decision: str) -> dict[str, Any]:
+    """Record a one-time UI decision; does not execute an external action."""
+    with _approval_file_lock():
+        queue = _load_approvals()
+        for item in queue:
+            if item.get("id") != approval_id:
+                continue
+            if item.get("status") != "pending":
+                raise HTTPException(status_code=409, detail="Approval is no longer pending")
+            if item.get("params_hash") != _approval_hash(item):
+                raise HTTPException(status_code=409, detail="Approval parameters changed")
+            if decision not in {"approve", "deny", "reject"}:
+                raise HTTPException(status_code=400, detail="Invalid decision")
+            item["status"] = "approved" if decision == "approve" else "denied"
+            item["decided_at"] = time()
+            _save_approvals(queue)
+            return {"ok": True, "approval": item, "executed": False}
+        raise HTTPException(status_code=404, detail="Approval not found")
 
 
 def _persist_run_record(kind: str, output: dict[str, Any]) -> None:
@@ -336,12 +405,18 @@ def _recent_runs(limit: int = 20) -> list[dict[str, Any]]:
     path = _runs_path()
     if not path.is_file():
         return []
+    # Avoid loading an unbounded JSONL history into memory on every status poll.
+    bounded_limit = max(1, min(int(limit), _MAX_RUN_HISTORY))
+    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+        recent_lines = deque(handle, maxlen=bounded_limit)
     rows = []
-    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[-max(1, limit):]:
+    for line in recent_lines:
         try:
-            rows.append(json.loads(line))
+            record = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(record, dict):
+            rows.append(record)
     return list(reversed(rows))
 
 
@@ -369,7 +444,6 @@ def _restrict_open_tasks_tools(agent: Any) -> None:
 
 def _build_open_tasks_agent():
     from run_agent import AIAgent
-
     agent = AIAgent(
         platform="dashboard",
         quiet_mode=True,
@@ -409,7 +483,6 @@ def _run_open_tasks_agent(request: str, limit: int) -> dict[str, Any]:
         receipt = {"tool": "kanban_list", "status": "failed", "created_at": time(), "error": "Agent loop failed."}
         _persist_execution_receipt(receipt)
         return {"ok": False, "receipt": receipt, "result": None, "response": None}
-
     if raw_result is None:
         receipt = {"tool": "kanban_list", "status": "failed", "created_at": time(), "error": "Agent did not call kanban_list."}
         _persist_execution_receipt(receipt)
@@ -443,7 +516,6 @@ def _status_sync(profile: Optional[str]) -> dict[str, Any]:
         orchestrator_error = str(exc)
     else:
         orchestrator_error = ""
-
     with _config_profile_scope(profile):
         cfg = load_config()
         jarvis_cfg = _jarvis_skill_config(cfg)
@@ -452,7 +524,6 @@ def _status_sync(profile: Optional[str]) -> dict[str, Any]:
         model_inventory = _model_inventory(profile)
         runs = _recent_runs()
         pending_approvals = [item for item in _load_approvals() if item.get("status") == "pending"]
-
     automations = _jarvis_cron_jobs(profile)
     return {
         "ok": True,
@@ -496,7 +567,21 @@ async def _call_orchestrator(fn):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=f"Jarvis orchestrator missing: {exc}") from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Jarvis orchestration failed: {exc}") from exc
+        logging.exception("Jarvis orchestration failed")
+        raise HTTPException(status_code=500, detail="Jarvis orchestration failed") from exc
+
+
+class JarvisDialogueIntentRequest(BaseModel):
+    """Optional preflight classification; does not dispatch a tool or model."""
+    message: str = Field(min_length=1, max_length=8000)
+    mode: Literal["auto", "chat", "task"] = "auto"
+
+
+@router.post("/api/jarvis/dialogue/intent")
+async def classify_jarvis_dialogue_intent(body: JarvisDialogueIntentRequest):
+    """Give the UI a cheap hint; preserve Hermes chat and tool authorization."""
+    decision = JarvisIntentRouter().classify(body.message, body.mode)
+    return {"ok": True, **decision.to_dict()}
 
 
 @router.get("/api/jarvis/status")
@@ -516,7 +601,6 @@ async def get_jarvis_approvals(profile: Optional[str] = None):
                 "source": "profile_jarvis_approval_queue",
                 "message": "Approvals are persistent and one-time use. Execution adapters re-check action parameters before external writes.",
             }
-
     return await asyncio.to_thread(_load)
 
 
@@ -524,23 +608,8 @@ async def get_jarvis_approvals(profile: Optional[str] = None):
 async def decide_jarvis_approval(approval_id: str, body: JarvisApprovalDecision, profile: Optional[str] = None):
     def _decide():
         with _config_profile_scope(profile):
-            queue = _load_approvals()
-            for item in queue:
-                if item.get("id") != approval_id:
-                    continue
-                if item.get("status") != "pending":
-                    raise HTTPException(status_code=409, detail="Approval is no longer pending")
-                if item.get("params_hash") != _approval_hash(item):
-                    raise HTTPException(status_code=409, detail="Approval parameters changed")
-                item["status"] = "approved" if body.decision == "approve" else "denied"
-                item["decided_at"] = time()
-                _save_approvals(queue)
-                return {"ok": True, "approval": item, "executed": False}
-            raise HTTPException(status_code=404, detail="Approval not found")
-
+            return _decide_approval_record(approval_id, body.decision)
     return await asyncio.to_thread(_decide)
-
-
 _JARVIS_SETTING_KEYS = {
     "jarvis.routing_mode",
     "jarvis.max_agents",
@@ -567,7 +636,6 @@ async def update_jarvis_settings(body: JarvisSettingsUpdate, profile: Optional[s
                 skill_cfg[key] = value
             atomic_config_write(get_config_path(), cfg)
             return {"ok": True, "config": _jarvis_skill_config(cfg)}
-
     return await asyncio.to_thread(_save)
 
 
@@ -576,7 +644,6 @@ async def get_jarvis_runs(profile: Optional[str] = None, limit: int = 20):
     def _load():
         with _config_profile_scope(profile):
             return {"ok": True, "runs": _recent_runs(limit)}
-
     return await asyncio.to_thread(_load)
 
 
@@ -594,7 +661,6 @@ async def execute_jarvis_kanban_list(body: JarvisKanbanListRequest, profile: Opt
                 args[key] = value
         with _config_profile_scope(profile):
             from model_tools import handle_function_call
-
             raw_result = handle_function_call(
                 "kanban_list", args, task_id="jarvis-kanban-read",
                 user_task="Jarvis liest Aufgaben aus dem Kanban.", enabled_toolsets=["kanban"],
@@ -602,7 +668,6 @@ async def execute_jarvis_kanban_list(body: JarvisKanbanListRequest, profile: Opt
             receipt, result = _tool_execution_receipt("kanban_list", raw_result)
             _persist_execution_receipt(receipt)
             return {"ok": receipt["status"] == "completed", "receipt": receipt, "result": result}
-
     return await _call_orchestrator(_run)
 
 
@@ -611,11 +676,9 @@ async def execute_jarvis_open_tasks(body: JarvisOpenTasksRequest, profile: Optio
     request = body.request.strip()
     if not _is_open_tasks_request(request):
         raise HTTPException(status_code=400, detail="This endpoint only supports asking for open tasks.")
-
     def _run():
         with _config_profile_scope(profile):
             return _run_open_tasks_agent(request, body.limit)
-
     return await _call_orchestrator(_run)
 
 
@@ -624,7 +687,6 @@ async def plan_jarvis_orchestration(body: JarvisOrchestrationRequest, profile: O
     request = body.request.strip()
     if not request:
         raise HTTPException(status_code=400, detail="request is required")
-
     def _run():
         with _config_profile_scope(profile):
             module = _orchestrator_module()
@@ -632,7 +694,6 @@ async def plan_jarvis_orchestration(body: JarvisOrchestrationRequest, profile: O
             _persist_run_record("plan", output)
             _enqueue_approvals(output)
             return output
-
     return await _call_orchestrator(_run)
 
 
@@ -641,7 +702,6 @@ async def run_jarvis_orchestration(body: JarvisOrchestrationRequest, profile: Op
     request = body.request.strip()
     if not request:
         raise HTTPException(status_code=400, detail="request is required")
-
     def _run():
         with _config_profile_scope(profile):
             module = _orchestrator_module()
@@ -649,7 +709,6 @@ async def run_jarvis_orchestration(body: JarvisOrchestrationRequest, profile: Op
             _persist_run_record("run", output)
             _enqueue_approvals(output)
             return output
-
     return await _call_orchestrator(_run)
 
 
@@ -658,7 +717,6 @@ async def run_jarvis_agent(agent_id: str, body: JarvisOrchestrationRequest, prof
     request = body.request.strip()
     if not request:
         raise HTTPException(status_code=400, detail="request is required")
-
     def _run():
         with _config_profile_scope(profile):
             module = _orchestrator_module()
@@ -684,5 +742,4 @@ async def run_jarvis_agent(agent_id: str, body: JarvisOrchestrationRequest, prof
                 },
             })
             return result
-
     return await _call_orchestrator(_run)

@@ -1,6 +1,7 @@
 import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
 import type { JarvisVisualProps } from './types'
 import type { ProductionVoiceState, VoiceHistoryEntry } from './voice-runtime/production-state'
+import type { VoiceApprovalDisplay, VoiceApprovalChoice } from './voice-runtime/hermes-conversation'
 
 export interface JarvisWorkspaceProps extends JarvisVisualProps {
   memory: MemoryStatus | null
@@ -15,6 +16,8 @@ export interface JarvisWorkspaceProps extends JarvisVisualProps {
   voiceStream?: MediaStream | null
   voiceResponse?: string
   voiceProgress?: number
+  voiceApproval?: VoiceApprovalDisplay | null
+  onVoiceApprovalDecision?: (id: string, choice: VoiceApprovalChoice) => void
   onCancelVoice?: () => void
   approvalBusy?: boolean
   approvalHistory?: string[]

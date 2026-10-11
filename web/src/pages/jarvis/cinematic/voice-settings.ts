@@ -26,6 +26,11 @@ export function subscribeVoiceSettings(listener: (settings: VoiceSettings) => vo
 }
 export function applyVoiceSpeedCommand(transcript: string, profile = ''): VoiceSettings | null {
   const normalized = transcript.toLocaleLowerCase('de-DE')
+  if (/^(?:jarvis[,!\s]+)?(?:bitte\s+)?(?:benutze deine normale stimme|sprich (?:wieder )?normal)[.!?\s]*$/.test(normalized)) {
+    const next = { ...loadVoiceSettings(profile), speed: defaults.speed }
+    saveVoiceSettings(next, profile)
+    return next
+  }
   if (!/^(?:jarvis[,!\s]+)?(?:(?:bitte|sprich|mach deine stimme)\s+)*(?:um\s+)?(?:\d+\s*(?:prozent|%)\s+)?(?:langsamer|schneller)[.!?\s]*$/.test(normalized)) return null
   const current = loadVoiceSettings(profile)
   const percentage = Number(normalized.match(/(\d+)\s*(?:prozent|%)/)?.[1] ?? 10) / 100

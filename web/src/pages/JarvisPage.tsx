@@ -5,6 +5,8 @@ import { Button } from '@nous-research/ui/ui/components/button'
 import { Toast } from '@nous-research/ui/ui/components/toast'
 import { useToast } from '@nous-research/ui/hooks/use-toast'
 import { api } from '@/lib/api'
+import { GatewayClient } from '@/lib/gatewayClient'
+import { HermesVoiceConversation, type VoiceApprovalDisplay } from './jarvis/voice-runtime/hermes-conversation'
 import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
 import { ApiError, errorMessage } from '@/lib/api-error'
 import { useProfileScope } from '@/contexts/useProfileScope'
@@ -38,8 +40,9 @@ function executionLimits(config: Record<string, unknown> = {}) {
 }
 
 export default function JarvisPage() {
-  const { profile } = useProfileScope()
-  return <ProfileWorkspace key={profile} profile={profile} />
+  const { profile, currentProfile } = useProfileScope()
+  const boundProfile = profile || currentProfile
+  return <ProfileWorkspace key={boundProfile} profile={boundProfile} />
 }
 
 function ProfileWorkspace({ profile }: { profile: string }) {
@@ -62,6 +65,8 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   const [voiceStream, setVoiceStream] = useState<MediaStream | null>(null)
   const [voiceResponse, setVoiceResponse] = useState('')
   const [voiceProgress, setVoiceProgress] = useState(0)
+  const [voiceApproval, setVoiceApproval] = useState<VoiceApprovalDisplay | null>(null)
+  const conversation = useRef<HermesVoiceConversation | null>(null)
   const voiceOperation = useRef<AbortController | null>(null)
   const captureStop = useRef<(() => void) | null>(null)
   const runLock = useRef(false)
@@ -75,6 +80,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     captureStop.current = null
     playerRef.current?.pause()
     setVoiceStream(null)
+    setVoiceResponse('')
     setVoiceBusy(null)
     setVoiceState('idle')
   }, [])
@@ -91,6 +97,8 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       playerRef.current?.pause()
       voiceOperation.current?.abort()
       captureStop.current?.()
+      conversation.current?.close()
+      conversation.current = null
     }
   }, [])
 
@@ -181,7 +189,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   }
 
   const run = async (mode: 'plan' | 'run', command = { request, agentId: selectedAgent }, signal = lifetime.current.signal, fromVoice = false) => {
-    if (signal.aborted || runLock.current) return
+    if (signal.aborted || runLock.current || (!fromVoice && voiceOperation.current)) return
     const { request: activeRequest, agentId: activeAgent } = command
     if (!activeRequest.trim()) return showToast('Aufgabe fehlt.', 'error')
     if (!payload) return showToast('Payload ist kein JSON-Objekt.', 'error')
@@ -233,7 +241,15 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     const speed = applyVoiceSpeedCommand(transcript, profile)
     if (speed) return `Sprechgeschwindigkeit auf ${speed.speed.toFixed(2)} angepasst.`
     const command = routeVoiceCommand(transcript)
-    if (!command) return 'Deine Spracheingabe ist als Auftrag vorbereitet. Bitte den Auftrag prüfen und ausdrücklich Planen oder Ausführen wählen. Für freie Gespräche steht der Hermes Chat zur Verfügung.'
+    if (!command) {
+      setVoiceBusy('thinking')
+      setVoicePhase('thinking')
+      if (!conversation.current) conversation.current = new HermesVoiceConversation(profile, () => new GatewayClient(), setVoiceApproval)
+      const reply = await conversation.current.submit(transcript, signal, text => {
+        if (!signal.aborted && !lifetime.current.signal.aborted) setVoiceResponse(text)
+      })
+      return reply.text
+    }
     const hints = command.agentHint === 'email' ? ['email', 'mail'] : [command.agentHint]
     const matchingAgent = status?.agents.find(agent => hints.includes(agent.agent_id.toLowerCase()))?.agent_id
     if (command.execute && !matchingAgent) return 'Der benötigte Agent ist in diesem Profil nicht registriert. Es wurde nichts ausgeführt.'
@@ -251,6 +267,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   const processVoiceTranscript = async (transcript: string, signal = lifetime.current.signal) => {
     if (signal.aborted || !transcript.trim()) return
     setVoicePhase('processing')
+    setVoiceResponse('')
     setRequest(transcript)
     const action = await executeVoiceCommand(transcript, signal)
     if (signal.aborted) return
@@ -310,6 +327,23 @@ function ProfileWorkspace({ profile }: { profile: string }) {
 
   const stopVoice = () => { captureStop.current?.() }
 
+  const submitVoiceTranscript = async (transcript: string) => {
+    if (voiceOperation.current || runLock.current || lifetime.current.signal.aborted) return
+    const operation = new AbortController()
+    voiceOperation.current = operation
+    setError('')
+    setVoiceState('idle')
+    try { await processVoiceTranscript(transcript, operation.signal) }
+    catch {
+      if (!operation.signal.aborted) {
+        setError('Sprachdialog unterbrochen. Bitte Provider und Verbindung prüfen; es wird nichts automatisch wiederholt.')
+        setVoiceState('error')
+      }
+    } finally {
+      if (voiceOperation.current === operation) { voiceOperation.current = null; setVoiceBusy(null) }
+    }
+  }
+
   const decideApproval = async (id: string, decision: 'approve' | 'deny') => {
     if (approvalLock.current || !status?.approvals.pending.some(item => item.id === id)) return
     approvalLock.current = true
@@ -356,6 +390,8 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         voiceStream={voiceStream}
         voiceResponse={voiceResponse}
         voiceProgress={voiceProgress}
+        voiceApproval={voiceApproval}
+        onVoiceApprovalDecision={(id, choice) => { conversation.current?.decideApproval(id, choice) }}
         onCancelVoice={cancelVoice}
         approvalBusy={approvalBusy}
         approvalHistory={approvalHistory}
@@ -367,7 +403,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         onRun={run}
         onRecordVoice={recordVoice}
         onStopVoice={stopVoice}
-        onVoiceTranscript={processVoiceTranscript}
+        onVoiceTranscript={submitVoiceTranscript}
         onSpeak={speak}
         onAutoSpeakChange={setAutoSpeak}
         onApprovalDecision={decideApproval}

@@ -14,6 +14,7 @@ import { Button } from '@nous-research/ui/ui/components/button'
 import { RuntimeEventStream } from './components/RuntimeEventStream'
 import { UnifiedApprovalPanel } from './components/autonomy/UnifiedApprovalPanel'
 import { SecurityCenter } from './components/autonomy/SecurityCenter'
+import { VoiceApprovalCard } from './components/autonomy/VoiceApprovalCard'
 import { LiveSystemCore } from './components/cinematic/LiveSystemCore'
 import type { JarvisWorkspace, JarvisWorkspaceProps } from './shell-types'
 import './jarvis-cinematic.css'
@@ -65,6 +66,7 @@ export function JarvisShell(props: JarvisWorkspaceProps) {
       </button>)}
     </nav>
     {props.error && <div className="command-error" role="alert">{props.error}</div>}
+    {props.voiceApproval && props.onVoiceApprovalDecision && <VoiceApprovalCard key={props.voiceApproval.id} approval={props.voiceApproval} onDecision={props.onVoiceApprovalDecision} />}
     <main className="command-main" aria-busy={props.loading}>
       {props.loading ? <LoadingWorkspace /> : <Suspense fallback={<LoadingWorkspace />}><Workspace workspace={workspace} {...scoped} /></Suspense>}
     </main>
@@ -81,7 +83,7 @@ function LoadingWorkspace() { return <div className="jarvis-glass flex min-h-80 
 function SystemMetric({ label, value }: { label: string; value: string }) { return <span><b className="mr-1 font-medium text-cyan-200">{label}</b>{value}</span> }
 function Workspace({ workspace, ...props }: JarvisWorkspaceProps & { workspace: JarvisWorkspace }) { switch (workspace) { case 'voice': return <VoiceWorkspace {...props} />; case 'agents': return <AgentsWorkspace {...props} />; case 'memory': return <MemoryWorkspace {...props} />; case 'runtime': return <RuntimeWorkspace {...props} />; case 'security': return <SecurityWorkspace {...props} />; case 'settings': return <SettingsWorkspace {...props} />; default: return <JarvisDashboard {...props} /> } }
 function VoiceWorkspace(props: JarvisWorkspaceProps) {
-  return <div className="space-y-5"><WorkspaceTitle icon={Mic} title="Voice Intelligence Center" detail="Bewusste Aufnahme, sichtbarer Auftrag und echte TTS-Wiedergabe über dein Hermes-Profil." /><CinematicVoiceConsole {...props} /></div>
+  return <div className="space-y-5"><WorkspaceTitle icon={Mic} title="Voice Intelligence Center" detail="Bewusste Aufnahme, Hermes-Sprachdialog und echte TTS-Wiedergabe über dein Profil." /><CinematicVoiceConsole {...props} /></div>
 }
 function AgentsWorkspace(props: JarvisWorkspaceProps) {
   return <div className="space-y-5"><WorkspaceTitle icon={Bot} title="Agent Command Center" detail="Registrierte Agenten auswählen, Aufträge planen und bewusst ausführen." /><AgentRegistryCenter {...props} /></div>
