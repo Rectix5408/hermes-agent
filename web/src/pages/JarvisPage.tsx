@@ -12,7 +12,8 @@ import { usePageHeader } from '@/contexts/usePageHeader'
 import { JarvisShell } from './jarvis/JarvisShell'
 import { emit } from './jarvis/runtime/event-bus'
 import { routeVoiceCommand } from './jarvis/cinematic/voice-command-router'
-import { applyVoiceSpeedCommand } from './jarvis/cinematic/voice-settings'
+import { captureMicrophone, captureBrowserSpeech } from './jarvis/voice-runtime/microphone'
+import { applyVoiceSpeedCommand, loadVoiceSettings } from './jarvis/cinematic/voice-settings'
 import { appendVoiceHistory, microphoneErrorMessage, transitionVoiceState, type ProductionVoiceState, type VoiceHistoryEntry } from './jarvis/voice-runtime/production-state'
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -22,6 +23,18 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error || new Error('Audio konnte nicht gelesen werden.'))
     reader.readAsDataURL(blob)
   })
+}
+
+function executionLimits(config: Record<string, unknown> = {}) {
+  return {
+    max_agents: config.max_agents ?? 3,
+    max_parallel: config.max_parallel ?? 2,
+    cost_tier: config.cost_tier ?? 'low',
+    max_estimated_cost_usd: config.max_estimated_cost_usd ?? 0,
+    routing_mode: config.routing_mode ?? 'local_first',
+    max_prompt_tokens: config.max_prompt_tokens ?? 4000,
+    max_completion_tokens: config.max_completion_tokens ?? 1200,
+  }
 }
 
 export default function JarvisPage() {
@@ -46,8 +59,25 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   const [voiceState, setVoiceState] = useState<ProductionVoiceState>('idle')
   const [voiceHistory, setVoiceHistory] = useState<VoiceHistoryEntry[]>([])
   const [autoSpeak, setAutoSpeak] = useState(false)
-  const recorderRef = useRef<MediaRecorder | null>(null)
-  const recordingTimerRef = useRef<number | null>(null)
+  const [voiceStream, setVoiceStream] = useState<MediaStream | null>(null)
+  const [voiceResponse, setVoiceResponse] = useState('')
+  const [voiceProgress, setVoiceProgress] = useState(0)
+  const voiceOperation = useRef<AbortController | null>(null)
+  const captureStop = useRef<(() => void) | null>(null)
+  const runLock = useRef(false)
+  const [approvalBusy, setApprovalBusy] = useState(false)
+  const approvalLock = useRef(false)
+  const [approvalHistory, setApprovalHistory] = useState<string[]>([])
+  const cancelVoice = useCallback(() => {
+    voiceOperation.current?.abort()
+    voiceOperation.current = null
+    captureStop.current?.()
+    captureStop.current = null
+    playerRef.current?.pause()
+    setVoiceStream(null)
+    setVoiceBusy(null)
+    setVoiceState('idle')
+  }, [])
   const lifetime = useRef(new AbortController())
   const refreshRequest = useRef<AbortController | null>(null)
   const playerRef = useRef<HTMLAudioElement | null>(null)
@@ -59,9 +89,8 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       lifetime.current.abort()
       refreshRequest.current?.abort()
       playerRef.current?.pause()
-      if (recordingTimerRef.current) window.clearTimeout(recordingTimerRef.current)
-      recorderRef.current?.stream.getTracks().forEach(track => track.stop())
-      if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop()
+      voiceOperation.current?.abort()
+      captureStop.current?.()
     }
   }, [])
 
@@ -70,7 +99,6 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     refreshRequest.current?.abort()
     const controller = new AbortController()
     refreshRequest.current = controller
-    setLoading(true)
     setError('')
     try {
       const [nextStatus, nextMemory] = await Promise.all([api.getJarvisStatus(profile, controller.signal), api.getMemory(profile, controller.signal).catch(() => null)])
@@ -112,9 +140,16 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     }
   }, [payloadText])
 
-  const speak = async (text: string, speed = 1) => {
-    const signal = lifetime.current.signal
+  const speak = async (text: string, speed = loadVoiceSettings(profile).speed, providedSignal?: AbortSignal) => {
+    if (lifetime.current.signal.aborted) return
+    const operation = providedSignal ? null : new AbortController()
+    if (operation) {
+      if (voiceOperation.current) return
+      voiceOperation.current = operation
+    }
+    const signal = providedSignal ?? operation!.signal
     if (signal.aborted) return
+    setVoiceProgress(0)
     setVoiceBusy('speaking')
     setVoicePhase('speaking')
     try {
@@ -123,39 +158,38 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       await new Promise<void>((resolve, reject) => {
         const player = new Audio(audio.data_url)
         playerRef.current = player
-        signal.addEventListener('abort', () => { player.pause(); resolve() }, { once: true })
         player.playbackRate = speed
-        player.onended = () => resolve()
-        player.onerror = () => reject(new Error('Audio konnte nicht abgespielt werden.'))
-        void player.play().catch(reject)
+        const aborted = () => { player.pause(); cleanup(); resolve() }
+        const cleanup = () => { signal.removeEventListener('abort', aborted); player.onended = null; player.onerror = null; player.ontimeupdate = null }
+        signal.addEventListener('abort', aborted, { once: true })
+        player.ontimeupdate = () => { if (Number.isFinite(player.duration) && player.duration > 0) setVoiceProgress(player.currentTime / player.duration) }
+        player.onended = () => { cleanup(); setVoiceProgress(1); resolve() }
+        player.onerror = () => { cleanup(); reject(new Error('Audio konnte nicht abgespielt werden.')) }
+        void player.play().catch(error => { cleanup(); reject(error) })
       })
     } catch (err) {
-      setError(errorMessage(err))
+      if (signal.aborted) return
+      setError(err instanceof DOMException && err.name === 'NotAllowedError' ? 'Wiedergabe vom Browser blockiert. Bitte „Antwort sprechen“ anklicken.' : 'Sprachausgabe nicht verfügbar. Bitte TTS-Konfiguration prüfen.')
       setVoicePhase('error')
     } finally {
-      setVoiceBusy(null)
-      setVoiceState(current => current === 'error' ? current : 'idle')
+      if (operation && voiceOperation.current === operation) voiceOperation.current = null
+      if (!signal.aborted) {
+        setVoiceBusy(null)
+        setVoiceState(current => current === 'error' ? current : 'idle')
+      }
     }
   }
 
-  const run = async (mode: 'plan' | 'run', command = { request, agentId: selectedAgent }) => {
-    const signal = lifetime.current.signal
-    if (signal.aborted || busy) return
+  const run = async (mode: 'plan' | 'run', command = { request, agentId: selectedAgent }, signal = lifetime.current.signal, fromVoice = false) => {
+    if (signal.aborted || runLock.current) return
     const { request: activeRequest, agentId: activeAgent } = command
     if (!activeRequest.trim()) return showToast('Aufgabe fehlt.', 'error')
     if (!payload) return showToast('Payload ist kein JSON-Objekt.', 'error')
+    runLock.current = true
     setBusy(mode)
     setError('')
     try {
-      const limits = {
-        max_agents: status?.config.max_agents ?? 3,
-        max_parallel: status?.config.max_parallel ?? 2,
-        cost_tier: status?.config.cost_tier ?? 'low',
-        max_estimated_cost_usd: status?.config.max_estimated_cost_usd ?? 0,
-        routing_mode: status?.config.routing_mode ?? 'local_first',
-        max_prompt_tokens: status?.config.max_prompt_tokens ?? 4000,
-        max_completion_tokens: status?.config.max_completion_tokens ?? 1200
-      }
+      const limits = executionLimits(status?.config)
       const body = { request: activeRequest, payload, limits }
       emit({ profile, source: 'task', type: mode === 'run' ? 'TASK_STARTED' : 'TASK_PLANNED', status: 'started', payload: { agent: activeAgent } })
       const next =
@@ -179,106 +213,117 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       if (signal.aborted) return
       setResult(next)
       emit({ profile, source: 'task', type: 'TASK_COMPLETED', status: 'completed', payload: { status: next.status } })
-      if (autoSpeak && next.consolidated?.summary) await speak(next.consolidated.summary)
+      const summary = next.consolidated?.summary || next.results?.map(item => item.summary).filter(Boolean).join('\n') || 'Plan erstellt.'
+      if (autoSpeak && !fromVoice) await speak(summary)
       await refresh()
+      return summary
     } catch (err) {
-      setError(errorMessage(err))
+      if (!signal.aborted) {
+        setError(errorMessage(err))
+        emit({ profile, source: 'task', type: 'TASK_FAILED', status: 'failed' })
+        if (fromVoice) throw new Error('Der Auftrag konnte nicht abgeschlossen werden.')
+      }
     } finally {
+      runLock.current = false
       setBusy(null)
     }
   }
 
-  const executeVoiceCommand = async (transcript: string): Promise<string> => {
-    const speed = applyVoiceSpeedCommand(transcript)
-    if (speed) { showToast(`Sprechgeschwindigkeit: ${speed.speed.toFixed(2)}×`, 'success'); return 'TTS Geschwindigkeit angepasst' }
+  const executeVoiceCommand = async (transcript: string, signal: AbortSignal): Promise<string> => {
+    const speed = applyVoiceSpeedCommand(transcript, profile)
+    if (speed) return `Sprechgeschwindigkeit auf ${speed.speed.toFixed(2)} angepasst.`
     const command = routeVoiceCommand(transcript)
-    if (!command) return 'Kein deterministischer Befehl erkannt'
-    const matchingAgent = status?.agents.find(agent => agent.agent_id.toLowerCase().includes(command.agentHint))?.agent_id ?? 'auto'
+    if (!command) return 'Deine Spracheingabe ist als Auftrag vorbereitet. Bitte den Auftrag prüfen und ausdrücklich Planen oder Ausführen wählen. Für freie Gespräche steht der Hermes Chat zur Verfügung.'
+    const hints = command.agentHint === 'email' ? ['email', 'mail'] : [command.agentHint]
+    const matchingAgent = status?.agents.find(agent => hints.includes(agent.agent_id.toLowerCase()))?.agent_id
+    if (command.execute && !matchingAgent) return 'Der benötigte Agent ist in diesem Profil nicht registriert. Es wurde nichts ausgeführt.'
     setRequest(command.request)
-    setSelectedAgent(matchingAgent)
-    showToast(command.response, 'success')
-    emit({ profile, source: 'voice', type: 'VOICE_COMMAND_ROUTED', status: 'completed', payload: { agent: matchingAgent } })
-    if (command.execute) { setVoiceBusy('thinking'); setVoicePhase('thinking'); await run('run', { request: command.request, agentId: matchingAgent }) }
-    else await refresh()
+    setSelectedAgent(matchingAgent ?? 'auto')
+    emit({ profile, source: 'voice', type: 'VOICE_COMMAND_ROUTED', status: 'completed', payload: { agent: matchingAgent ?? 'auto' } })
+    if (command.execute) {
+      setVoiceBusy('thinking'); setVoicePhase('thinking')
+      return await run('run', { request: command.request, agentId: matchingAgent! }, signal, true) || 'Keine neue Ausführung gestartet.'
+    }
+    await refresh()
     return command.response
   }
 
-  const processVoiceTranscript = async (transcript: string) => {
+  const processVoiceTranscript = async (transcript: string, signal = lifetime.current.signal) => {
+    if (signal.aborted || !transcript.trim()) return
     setVoicePhase('processing')
     setRequest(transcript)
-    const action = await executeVoiceCommand(transcript)
+    const action = await executeVoiceCommand(transcript, signal)
+    if (signal.aborted) return
     setVoiceHistory(history => appendVoiceHistory(history, transcript, action))
+    setVoiceResponse(action)
+    if (status?.voice?.tts.configured) await speak(action, loadVoiceSettings(profile).speed, signal)
     setVoiceState(current => current === 'error' ? current : 'idle')
   }
 
   const recordVoice = async () => {
-    const signal = lifetime.current.signal
-    if (signal.aborted || voiceBusy) return
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined')
-      return showToast('Browseraufnahme ist hier nicht verfügbar.', 'error')
+    if (lifetime.current.signal.aborted || voiceOperation.current || runLock.current) return
+    const settings = loadVoiceSettings(profile)
+    if (settings.sttEngine === 'disabled') { setError('Bitte eine Spracherkennung auswählen.'); return }
+    const operation = new AbortController()
+    voiceOperation.current = operation
+    const signal = operation.signal
     setVoiceBusy('recording')
-    setVoicePhase('listening')
-    emit({ profile, source: 'voice', type: 'LISTENING_STARTED', status: 'started' })
+    setVoiceState('listening')
     setError('')
+    let transcribing = false
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      if (signal.aborted) { stream.getTracks().forEach(track => track.stop()); return }
-      const recorder = new MediaRecorder(stream)
-      recorderRef.current = recorder
-      const chunks: Blob[] = []
-      recorder.ondataavailable = event => {
-        if (event.data.size > 0) chunks.push(event.data)
-      }
-      const stopped = new Promise<Blob>(resolve => {
-        recorder.onstop = () => {
-          stream.getTracks().forEach(track => track.stop())
-          recorderRef.current = null
-          if (recordingTimerRef.current) window.clearTimeout(recordingTimerRef.current)
-          recordingTimerRef.current = null
-          resolve(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
-        }
-      })
-      recorder.start()
-      recordingTimerRef.current = window.setTimeout(() => {
-        if (recorder.state !== 'inactive') recorder.stop()
-      }, 60_000)
-      const blob = await stopped
+      const capture = settings.sttEngine === 'browser-speech'
+        ? captureBrowserSpeech(signal)
+        : captureMicrophone(settings.deviceId ?? '', signal, stream => { if (voiceOperation.current === operation) setVoiceStream(stream) })
+      captureStop.current = capture.stop
+      const audio = await capture.recording
       if (signal.aborted) return
       setVoiceBusy('transcribing')
       setVoicePhase('processing')
-      const data = await blobToDataUrl(blob)
-      if (signal.aborted) return
-      const transcript = await api.transcribeAudio(data, blob.type || 'audio/webm', profile, signal)
-      if (signal.aborted) return
-      if (transcript.transcript) {
-        emit({ profile, source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed', payload: { provider: transcript.provider ?? 'configured' } })
-        showToast('Sprache erkannt.', 'success')
-        await processVoiceTranscript(transcript.transcript)
-      } else {
-        showToast('Keine Sprache erkannt.', 'error')
+      transcribing = true
+      let transcript: string
+      if (typeof audio === 'string') transcript = audio
+      else {
+        const data = await blobToDataUrl(audio)
+        if (signal.aborted) return
+        const response = await api.transcribeAudio(data, audio.type, profile, signal)
+        transcript = response.transcript
       }
+      if (signal.aborted) return
+      if (!transcript.trim()) throw new Error('Keine Sprache erkannt. Bitte erneut sprechen.')
+      emit({ profile, source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed' })
+      await processVoiceTranscript(transcript, signal)
     } catch (err) {
-      setError(microphoneErrorMessage(err))
-      setVoicePhase('error')
+      if (!signal.aborted) {
+        setError(transcribing ? 'Spracherkennung oder Auftrag fehlgeschlagen. Bitte Provider und Verbindung prüfen.' : err instanceof DOMException ? microphoneErrorMessage(err) : err instanceof Error ? err.message : 'Aufnahme nicht verfügbar.')
+        setVoiceState('error')
+      }
     } finally {
-      setVoiceBusy(null)
-      setVoiceState(current => current === 'error' ? current : 'idle')
+      if (voiceOperation.current === operation) {
+        voiceOperation.current = null
+        captureStop.current = null
+        setVoiceBusy(null)
+        setVoiceState(current => current === 'error' ? current : 'idle')
+      }
     }
   }
 
-  const stopVoice = () => {
-    if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
-  }
+  const stopVoice = () => { captureStop.current?.() }
 
   const decideApproval = async (id: string, decision: 'approve' | 'deny') => {
+    if (approvalLock.current || !status?.approvals.pending.some(item => item.id === id)) return
+    approvalLock.current = true
+    setApprovalBusy(true)
     try {
       await api.decideJarvisApproval(id, decision, profile, lifetime.current.signal)
       if (lifetime.current.signal.aborted) return
       await refresh()
+      setApprovalHistory(previous => [`${new Date().toLocaleTimeString('de-DE')} · ${decision === 'approve' ? 'Erlaubt' : 'Abgelehnt'} · ${id}`, ...previous].slice(0, 20))
       showToast(decision === 'approve' ? 'Freigabe markiert.' : 'Freigabe abgelehnt.', 'success')
     } catch (err) {
       setError(errorMessage(err))
     }
+    finally { approvalLock.current = false; setApprovalBusy(false) }
   }
   const saveRoutingMode = async (mode: string) => {
     try {
@@ -308,6 +353,12 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         voiceBusy={voiceBusy}
         voiceState={voiceState}
         voiceHistory={voiceHistory}
+        voiceStream={voiceStream}
+        voiceResponse={voiceResponse}
+        voiceProgress={voiceProgress}
+        onCancelVoice={cancelVoice}
+        approvalBusy={approvalBusy}
+        approvalHistory={approvalHistory}
         autoSpeak={autoSpeak}
         onNavigate={navigate}
         onRequestChange={setRequest}

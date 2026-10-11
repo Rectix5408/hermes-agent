@@ -12,6 +12,12 @@ export interface JarvisWorkspaceProps extends JarvisVisualProps {
   autoSpeak: boolean
   voiceState: ProductionVoiceState
   voiceHistory: VoiceHistoryEntry[]
+  voiceStream?: MediaStream | null
+  voiceResponse?: string
+  voiceProgress?: number
+  onCancelVoice?: () => void
+  approvalBusy?: boolean
+  approvalHistory?: string[]
   onNavigate: (path: string) => void
   onRequestChange: (value: string) => void
   onPayloadChange: (value: string) => void

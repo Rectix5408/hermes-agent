@@ -12,9 +12,11 @@ const seam = vi.hoisted(() => ({ props: null as JarvisWorkspaceProps | null }))
 const mocked = vi.hoisted(() => ({
   getJarvisStatus: vi.fn(), getMemory: vi.fn(), planJarvis: vi.fn(),
   runJarvis: vi.fn(), runJarvisAgent: vi.fn(), speakText: vi.fn(),
-  setEnd: vi.fn(), setTitle: vi.fn(), showToast: vi.fn(),
+  setEnd: vi.fn(), setTitle: vi.fn(), showToast: vi.fn(), transcribeAudio: vi.fn(),
+  captureMicrophone: vi.fn(), decideJarvisApproval: vi.fn(),
 }))
 vi.mock('@/lib/api', () => ({ api: mocked }))
+vi.mock('./jarvis/voice-runtime/microphone', () => ({ captureMicrophone: mocked.captureMicrophone, captureBrowserSpeech: vi.fn() }))
 vi.mock('@/contexts/usePageHeader', () => ({ usePageHeader: () => mocked }))
 vi.mock('@nous-research/ui/hooks/use-toast', () => ({ useToast: () => ({ toast: null, showToast: mocked.showToast }) }))
 vi.mock('@nous-research/ui/ui/components/toast', () => ({ Toast: () => null }))
@@ -35,7 +37,7 @@ beforeEach(() => {
   mocked.planJarvis.mockResolvedValue({ status: 'planned' })
   host = document.createElement('div'); document.body.append(host); root = createRoot(host)
 })
-afterEach(async () => { await act(async () => root.unmount()); host.remove() })
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals() })
 
 describe('Jarvis session boundary', () => {
   it('aborts profile A reads, resets drafts, and ignores late responses after B is selected', async () => {
@@ -88,5 +90,57 @@ describe('Jarvis session boundary', () => {
     const signal = mocked.getJarvisStatus.mock.calls[0][1] as AbortSignal
     await act(async () => root.render(null))
     expect(signal.aborted).toBe(true)
+  })
+  it('routes a recorded read-only command to the registered agent and speaks its actual result', async () => {
+    const configured = { ...status, agents: [{ agent_id: 'email', title: 'Mail' }], voice: { tts: { configured: true } } } as unknown as JarvisStatusResponse
+    mocked.getJarvisStatus.mockResolvedValue(configured)
+    mocked.captureMicrophone.mockReturnValue({ recording: Promise.resolve(new Blob(['synthetic'], { type: 'audio/mp4' })), stop: vi.fn() })
+    mocked.transcribeAudio.mockResolvedValue({ transcript: 'Jarvis, prüfe meine Emails' })
+    mocked.runJarvisAgent.mockResolvedValue({ agent_id: 'email', status: 'completed', summary: 'Synthetisches Agentenergebnis', approval_required: [] })
+    mocked.speakText.mockResolvedValue({ data_url: 'data:audio/wav;base64,AA==' })
+    class Player {
+      playbackRate = 1; onended: (() => void) | null = null; onerror = null; ontimeupdate = null
+      pause() {}
+      play() { queueMicrotask(() => this.onended?.()); return Promise.resolve() }
+    }
+    vi.stubGlobal('Audio', Player)
+    await render('A')
+    await act(async () => seam.props!.onRecordVoice())
+    expect(mocked.transcribeAudio).toHaveBeenCalledWith(expect.stringContaining('data:'), 'audio/mp4', 'A', expect.any(AbortSignal))
+    expect(mocked.runJarvisAgent).toHaveBeenCalledWith('email', expect.any(Object), 'A', expect.any(AbortSignal))
+    expect(mocked.speakText).toHaveBeenCalledWith('Synthetisches Agentenergebnis', 'A', expect.any(AbortSignal))
+    expect(seam.props!.voiceResponse).toBe('Synthetisches Agentenergebnis')
+    expect(seam.props!.voiceBusy).toBeNull()
+    expect(seam.props!.voiceState).toBe('idle')
+  })
+  it('never falls back to automatic agent execution when a spoken specialist is absent', async () => {
+    await render('A')
+    await act(async () => seam.props!.onVoiceTranscript('Jarvis, prüfe meine Emails'))
+    expect(mocked.runJarvisAgent).not.toHaveBeenCalled()
+    expect(mocked.runJarvis).not.toHaveBeenCalled()
+    expect(seam.props!.voiceResponse).toContain('nicht registriert')
+  })
+  it('cancels an in-flight transcription when leaving voice and ignores the late command', async () => {
+    let finish!: (value: unknown) => void
+    mocked.captureMicrophone.mockReturnValue({ recording: Promise.resolve(new Blob(['synthetic'])), stop: vi.fn() })
+    mocked.transcribeAudio.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    await render('A')
+    act(() => { void seam.props!.onRecordVoice() })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) })
+    const signal = mocked.transcribeAudio.mock.calls.at(-1)![3] as AbortSignal
+    await act(async () => seam.props!.onCancelVoice?.())
+    await act(async () => finish({ transcript: 'Jarvis, prüfe meine Emails' }))
+    expect(signal.aborted).toBe(true)
+    expect(mocked.runJarvisAgent).not.toHaveBeenCalled()
+    expect(seam.props!.voiceHistory).toHaveLength(0)
+  })
+  it('deduplicates decisions and rejects IDs outside the current approval queue', async () => {
+    mocked.getJarvisStatus.mockResolvedValue({ ...status, approvals: { pending: [{ id: 'allowed' }] } })
+    let finish!: (value: unknown) => void
+    mocked.decideJarvisApproval.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    await render('A')
+    act(() => { seam.props!.onApprovalDecision('foreign', 'approve'); seam.props!.onApprovalDecision('allowed', 'approve'); seam.props!.onApprovalDecision('allowed', 'deny') })
+    expect(mocked.decideJarvisApproval).toHaveBeenCalledExactlyOnceWith('allowed', 'approve', 'A', expect.any(AbortSignal))
+    await act(async () => finish({ ok: true }))
   })
 })

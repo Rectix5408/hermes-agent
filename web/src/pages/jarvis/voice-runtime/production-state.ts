@@ -3,7 +3,7 @@ export interface VoiceHistoryEntry { id: string; timestamp: string; text: string
 
 const transitions: Record<ProductionVoiceState, ProductionVoiceState[]> = {
   idle: ['listening', 'processing', 'thinking', 'speaking', 'error'], listening: ['processing', 'idle', 'error'],
-  processing: ['thinking', 'idle', 'error'], thinking: ['speaking', 'idle', 'error'],
+  processing: ['thinking', 'speaking', 'idle', 'error'], thinking: ['speaking', 'idle', 'error'],
   speaking: ['idle', 'error'], error: ['idle', 'listening']
 }
 export function transitionVoiceState(current: ProductionVoiceState, next: ProductionVoiceState): ProductionVoiceState { return current === next || transitions[current].includes(next) ? next : 'error' }

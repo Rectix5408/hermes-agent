@@ -1,157 +1,122 @@
 import { useEffect, useRef, useState } from 'react'
 import { Mic, Square, Volume2 } from 'lucide-react'
 import { Button } from '@nous-research/ui/ui/components/button'
-import type { JarvisStatusResponse } from '@/lib/api'
+import { useProfileScope } from '@/contexts/useProfileScope'
 import { loadVoiceSettings, saveVoiceSettings, subscribeVoiceSettings, type VoiceSettings } from '../../cinematic/voice-settings'
-import { AudioHologram, type HologramState } from './AudioHologram'
-import { microphoneErrorMessage, type ProductionVoiceState, type VoiceHistoryEntry } from '../../voice-runtime/production-state'
+import { AudioHologram } from './AudioHologram'
+import type { JarvisWorkspaceProps } from '../../shell-types'
 
-interface CinematicVoiceConsoleProps {
-  status: JarvisStatusResponse | null
-  voiceBusy: 'recording' | 'transcribing' | 'thinking' | 'speaking' | null
-  voiceState: ProductionVoiceState
-  history: VoiceHistoryEntry[]
-  response?: string
-  onRecordVoice: () => void
-  onStopVoice: () => void
-  onTranscript: (transcript: string) => void
-  onSpeak: (text: string, speed?: number) => void
+const labels = { idle: 'Bereit', listening: 'Aufnahme angefordert', processing: 'Sprache verarbeiten', thinking: 'Auftrag bearbeiten', speaking: 'Antwort wiedergeben', error: 'Unterbrochen' }
+
+function responseText(props: JarvisWorkspaceProps) {
+  return props.voiceResponse || props.result?.consolidated?.summary || props.result?.results?.map(item => item.summary).join('\n')
 }
 
-interface BrowserRecognition { lang: string; continuous: boolean; interimResults: boolean; onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null; onerror: (() => void) | null; onend: (() => void) | null; start(): void; stop(): void }
-type BrowserRecognitionConstructor = new () => BrowserRecognition
-
-export function CinematicVoiceConsole({ status, voiceBusy, voiceState, history, response, onRecordVoice, onStopVoice, onTranscript, onSpeak }: CinematicVoiceConsoleProps) {
-  const [settings, setSettings] = useState(loadVoiceSettings)
-  const [state, setState] = useState<HologramState>('idle')
-  const [permission, setPermission] = useState<'unknown' | 'granted' | 'denied'>('unknown')
-  const [device, setDevice] = useState('Standardmikrofon')
-  const [browserListening, setBrowserListening] = useState(false)
-  const [error, setError] = useState('')
-  const streamRef = useRef<MediaStream | null>(null)
-  const contextRef = useRef<AudioContext | null>(null)
+export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
+  const { profile } = useProfileScope()
+  const [settings, setSettings] = useState(() => loadVoiceSettings(profile))
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
+  const [permission, setPermission] = useState('Unbekannt')
+  const [notice, setNotice] = useState('')
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const frameRef = useRef<number | null>(null)
-  const recognitionRef = useRef<BrowserRecognition | null>(null)
-
-  const stop = () => {
-    streamRef.current?.getTracks().forEach(track => track.stop())
-    streamRef.current = null
-    void contextRef.current?.close()
-    contextRef.current = null
-    if (frameRef.current) cancelAnimationFrame(frameRef.current)
-    frameRef.current = null
-    setState('idle')
-  }
-
+  const stream = props.voiceStream
+  const cancelVoice = props.onCancelVoice
+  const locked = !!props.voiceBusy || !!props.busy
+  useEffect(() => subscribeVoiceSettings(setSettings, profile), [profile])
+  useEffect(() => () => cancelVoice?.(), [cancelVoice])
   useEffect(() => {
-    if (!navigator.permissions?.query) return
-    let status: PermissionStatus | undefined
-    void navigator.permissions.query({ name: 'microphone' as PermissionName }).then(result => {
-      status = result
-      setPermission(result.state === 'prompt' ? 'unknown' : result.state)
-      result.onchange = () => setPermission(result.state === 'prompt' ? 'unknown' : result.state)
-    })
-    return () => { if (status) status.onchange = null }
-  }, [])
-  useEffect(() => () => stop(), [])
-  useEffect(() => { saveVoiceSettings(settings) }, [settings])
-  useEffect(() => subscribeVoiceSettings(setSettings), [])
-
-  const updateSettings = (next: Partial<VoiceSettings>) => setSettings(value => ({ ...value, ...next }))
-  const start = async () => {
-    if (!navigator.mediaDevices?.getUserMedia) return setError('Mikrofon ist in diesem Browser nicht verfügbar.')
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
-      setDevice(stream.getAudioTracks()[0]?.label || 'Standardmikrofon')
-      updateSettings({ microphoneRequested: true })
-      setPermission('granted')
-      setError('')
-      setState('listening')
-      const context = new AudioContext()
-      contextRef.current = context
-      const analyser = context.createAnalyser()
-      analyser.fftSize = 64
-      context.createMediaStreamSource(stream).connect(analyser)
-      const values = new Uint8Array(analyser.frequencyBinCount)
-      const draw = () => {
-        const canvas = canvasRef.current
-        const ctx = canvas?.getContext('2d')
-        if (canvas && ctx) {
-          analyser.getByteFrequencyData(values)
-          ctx.clearRect(0, 0, canvas.width, canvas.height)
-          values.forEach((value, index) => {
-            const height = Math.max(3, value / 255 * canvas.height)
-            ctx.fillStyle = '#67e8f9'
-            ctx.fillRect(index * 7, (canvas.height - height) / 2, 3, height)
-          })
-        }
-        frameRef.current = requestAnimationFrame(draw)
-      }
-      draw()
-    } catch (error) {
-      setPermission('denied')
-      setError(microphoneErrorMessage(error))
+    let active = true
+    let permissionStatus: PermissionStatus | undefined
+    const updateDevices = () => {
+      if (!navigator.mediaDevices?.enumerateDevices) return
+      void navigator.mediaDevices.enumerateDevices().then(items => { if (active) setDevices(items.filter(item => item.kind === 'audioinput')) })
+        .catch(() => { if (active) setNotice('Geräteliste nicht verfügbar. HTTPS und Browserberechtigung prüfen.') })
     }
+    if (navigator.permissions?.query) void navigator.permissions.query({ name: 'microphone' as PermissionName })
+      .then(result => {
+        if (!active) return
+        permissionStatus = result
+        const update = () => setPermission(result.state === 'granted' ? 'Erlaubt' : result.state === 'denied' ? 'Verweigert' : 'Noch nicht erteilt')
+        update()
+        result.onchange = update
+      }).catch(() => { /* Safari may expose capture without microphone permission queries. */ })
+    updateDevices()
+    navigator.mediaDevices?.addEventListener?.('devicechange', updateDevices)
+    return () => { active = false; if (permissionStatus) permissionStatus.onchange = null; navigator.mediaDevices?.removeEventListener?.('devicechange', updateDevices) }
+  }, [stream])
+  useEffect(() => {
+    if (!stream || typeof AudioContext === 'undefined') return
+    const context = new AudioContext()
+    const analyser = context.createAnalyser()
+    analyser.fftSize = 128
+    const source = context.createMediaStreamSource(stream)
+    source.connect(analyser)
+    const values = new Uint8Array(analyser.frequencyBinCount)
+    const canvas = canvasRef.current
+    let frame = 0
+    const draw = () => {
+      const ctx = canvas?.getContext('2d')
+      if (!document.hidden && canvas && ctx) {
+        analyser.getByteFrequencyData(values)
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+        ctx.fillStyle = '#67e8f9'
+        values.forEach((value, index) => { const height = Math.max(2, value / 255 * 72); ctx.fillRect(index * 5, (72 - height) / 2, 3, height) })
+      }
+      frame = requestAnimationFrame(draw)
+    }
+    draw()
+    return () => { cancelAnimationFrame(frame); source.disconnect(); void context.close(); canvas?.getContext('2d')?.clearRect(0, 0, 320, 72) }
+  }, [stream])
+  const update = (value: Partial<VoiceSettings>) => {
+    const next = { ...settings, ...value }
+    setSettings(next)
+    setNotice(saveVoiceSettings(next, profile) ? 'Für dieses Profil in diesem Browser gespeichert.' : 'Browserspeicher gesperrt. Einstellungen gelten nur vorübergehend.')
   }
-
-  const startListening = () => {
-    if (settings.sttEngine === 'disabled') return setError('STT Engine Offline · wähle Whisper Local oder Browser Speech.')
-    if (settings.sttEngine === 'whisper-local') return onRecordVoice()
-    const recognitionWindow = window as unknown as { SpeechRecognition?: BrowserRecognitionConstructor; webkitSpeechRecognition?: BrowserRecognitionConstructor }
-    const Recognition = recognitionWindow.SpeechRecognition ?? recognitionWindow.webkitSpeechRecognition
-    if (!Recognition) return setError('Browser Speech ist in diesem Browser nicht verfügbar.')
-    const recognition = new Recognition()
-    recognition.lang = 'de-DE'; recognition.continuous = false; recognition.interimResults = false
-    recognition.onresult = event => { const transcript = event.results[0]?.[0]?.transcript.trim(); if (transcript) onTranscript(transcript) }
-    recognition.onerror = () => setError('Browser Speech konnte keine Sprache erkennen.')
-    recognition.onend = () => { recognitionRef.current = null; setBrowserListening(false); setState('idle') }
-    recognitionRef.current = recognition; setError(''); setBrowserListening(true); setState('listening'); recognition.start()
-  }
-  const stopListening = () => { if (recognitionRef.current) { recognitionRef.current.stop(); return } if (voiceBusy === 'recording') onStopVoice(); stop() }
-
-  const liveState: HologramState = error || voiceState === 'error' ? 'error' : voiceState === 'processing' ? 'processing' : voiceState === 'thinking' ? 'thinking' : voiceState === 'speaking' ? 'speaking' : voiceState === 'listening' || voiceBusy === 'recording' ? 'listening' : state
-  const stt = status?.voice.stt
-  const tts = status?.voice.tts
-  const sttRuntimeStatus = voiceBusy === 'transcribing' ? 'LOADING' : stt?.configured ? 'READY' : 'OFFLINE'
-  return <section id="jarvis-voice-cinematic" className="jarvis-glass relative overflow-hidden p-5">
-    <div className="jarvis-scanline" />
-    <div className="relative grid items-center gap-5 lg:grid-cols-[minmax(18rem,.8fr)_minmax(0,1fr)_minmax(18rem,.7fr)]">
-      <div className="jarvis-voice-reactor text-center">
-        <AudioHologram state={liveState} />
-        <p className="mt-4 text-xs uppercase tracking-[.22em] text-cyan-300/80">Voice Intelligence</p>
-        <p className="mt-1 text-xl text-slate-100">{liveState === 'processing' ? 'PROCESSING' : liveState.toUpperCase()}</p>
-        <div className="mt-3 grid grid-cols-3 gap-2 text-left text-[10px] uppercase tracking-[.08em] text-slate-500"><StatusMetric label="Permission" value={permission} /><StatusMetric label="Device" value={device} /><StatusMetric label="Recording" value={voiceBusy === 'recording' || state === 'listening' ? 'On' : 'Off'} /></div>
-      </div>
-      <div>
-        <p className="text-xs uppercase tracking-[.22em] text-cyan-300/80">Voice Core Console</p>
-        <h2 className="mt-1 text-2xl font-medium text-slate-100">Conversational Control</h2>
-        <p className="mt-2 text-sm text-slate-500">Browser-Mikrofon → Hermes STT → Command Router → Orchestrierung → TTS.</p>
-        <canvas ref={canvasRef} width="224" height="72" className="mt-6 h-18 w-full border-y border-cyan-300/15 bg-slate-950/60" />
-        <div className="mt-5 flex flex-wrap gap-2">
-          {state === 'listening' ? <Button onClick={stop}><Square className="h-4 w-4" />Audio-Monitor stoppen</Button> : <Button onClick={() => void start()}><Mic className="h-4 w-4" />Audio-Monitor</Button>}
-          <Button onClick={voiceBusy === 'recording' || browserListening ? stopListening : startListening} disabled={!!voiceBusy && voiceBusy !== 'recording'}><Mic className="h-4 w-4" />{voiceBusy === 'recording' || browserListening ? 'Stop Listening' : 'Start Listening'}</Button>
-          <Button outlined onClick={() => response && onSpeak(response, settings.speed)} disabled={!response || !!voiceBusy}><Volume2 className="h-4 w-4" />Antwort sprechen</Button>
+  const response = responseText(props)
+  const stt = props.status?.voice.stt
+  const tts = props.status?.voice.tts
+  return <section className="command-panel voice-console" aria-label="Sprachsteuerung">
+    <div className="voice-layout">
+      <div className="voice-reactor">
+        <AudioHologram state={props.voiceState} />
+        <h2 className="mt-6">{labels[props.voiceState]}</h2>
+        <dl className="operations-facts">
+          <div><dt>Berechtigung</dt><dd>{stream ? 'Erlaubt' : permission}</dd></div>
+          <div><dt>Mikrofon</dt><dd>{stream?.getAudioTracks()[0]?.label || (settings.sttEngine === 'browser-speech' ? 'Vom Browser verwaltet' : 'Nicht aktiv')}</dd></div>
+          <div><dt>Aufnahme</dt><dd>{stream ? 'Aktiv' : props.voiceBusy === 'recording' && settings.sttEngine === 'browser-speech' ? 'Browser-Erkennung angefordert' : 'Aus'}</dd></div>
+        </dl>
+        <canvas aria-label="Mikrofon-Frequenzen" ref={canvasRef} width="320" height="72" className="voice-waveform" />
+        <div className="command-actions">
+          <Button disabled={locked && props.voiceBusy !== 'recording'} onClick={props.voiceBusy === 'recording' ? props.onStopVoice : props.onRecordVoice}>
+            {props.voiceBusy === 'recording' ? <Square size={16} /> : <Mic size={16} />}
+            {props.voiceBusy === 'recording' ? 'Aufnahme beenden' : 'Zuhören starten'}
+          </Button>
+          <Button outlined disabled={!props.voiceBusy} onClick={props.onCancelVoice}>Abbrechen</Button>
+          <Button outlined disabled={!response || locked || !tts?.configured} onClick={() => response && props.onSpeak(response, settings.speed)}><Volume2 size={16} />Antwort sprechen</Button>
         </div>
-        {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
+        {props.voiceState === 'speaking' && <progress aria-label="Wiedergabefortschritt" max={1} value={props.voiceProgress ?? 0} />}
       </div>
-      <div className="jarvis-voice-settings border border-cyan-300/15 bg-black/20 p-4">
-        <p className="text-xs uppercase tracking-[.16em] text-slate-500">Voice settings</p>
-        <label className="mt-3 block text-xs text-slate-400">STT Engine<select value={settings.sttEngine} onChange={event => updateSettings({ sttEngine: event.target.value as VoiceSettings['sttEngine'] })} className="mt-1 block w-full border border-white/10 bg-slate-950 p-2 text-sm text-slate-100"><option value="whisper-local">Whisper Local</option><option value="browser-speech">Browser Speech</option><option value="disabled">Disabled</option></select></label>
-        <Setting label="Local Whisper Model" value={sttRuntimeStatus} />
-        <Setting label="Hermes STT Status" value={providerLabel(stt?.provider ?? stt?.available, 'STT Engine Offline · lokale Whisper-Installation abwarten')} />
-        <Setting label="Language" value={settings.language === 'de' ? 'Deutsch' : settings.language} />
-        <Setting label="TTS provider" value={providerLabel(tts?.provider ?? tts?.available, 'TTS Engine Offline · ElevenLabs-Konfiguration prüfen')} />
-        <label className="mt-3 block text-xs text-slate-400">Voice<select value={settings.voice} onChange={event => updateSettings({ voice: event.target.value })} className="mt-1 block w-full border border-white/10 bg-slate-950 p-2 text-sm text-slate-100"><option>Jarvis Voice</option><option>Calm Assistant</option></select></label>
-        <label className="mt-3 block text-xs text-slate-400">Voice ID<input value={settings.voiceId} onChange={event => updateSettings({ voiceId: event.target.value })} placeholder="Vom ElevenLabs-Profil verwaltet" className="mt-1 block w-full border border-white/10 bg-slate-950 p-2 text-sm text-slate-100 placeholder:text-slate-600" /></label>
-        <label className="mt-3 block text-xs text-slate-400">Speed <span className="float-right text-cyan-200">{settings.speed.toFixed(2)}×</span><input type="range" min="0.75" max="1.25" step="0.05" value={settings.speed} onChange={event => updateSettings({ speed: Number(event.target.value) })} className="mt-2 w-full accent-cyan-300" /></label>
-        <p className="mt-4 flex items-center gap-2 text-xs text-slate-500"><Volume2 className="h-3.5 w-3.5" /> Wiedergabegeschwindigkeit wird auf die echte TTS-Antwort angewandt.</p>
+      <div className="voice-settings">
+        <h2>Spracheinstellungen</h2>
+        <label className="command-field">Spracherkennung<select value={settings.sttEngine} disabled={locked} onChange={event => update({ sttEngine: event.target.value as VoiceSettings['sttEngine'] })}>
+          <option value="whisper-local">Hermes-STT (Serverkonfiguration)</option><option value="browser-speech">Browser-Spracherkennung</option><option value="disabled">Deaktiviert</option>
+        </select></label>
+        <p>{settings.sttEngine === 'browser-speech' ? 'Der Browser kann Audio an seinen Sprachanbieter senden. Nur nach ausdrücklichem Start; Standardmikrofon des Browsers.' : stt?.configured ? `Gemeldeter STT-Anbieter: ${stt.provider || 'Serverkonfiguration'}` : 'STT nicht eingerichtet. Bitte im Hermes-Profil konfigurieren.'}</p>
+        <label className="command-field">Eingabegerät<select disabled={locked || settings.sttEngine === 'browser-speech'} value={settings.deviceId ?? ''} onChange={event => update({ deviceId: event.target.value })}>
+          <option value="">Systemstandard</option>{devices.filter(device => device.deviceId).map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Mikrofon ${index + 1}`}</option>)}
+        </select></label>
+        <p>Gerätenamen werden gegebenenfalls erst nach Erlaubnis sichtbar. Aufnahme höchstens 60 Sekunden; kein automatischer Neustart.</p>
+        <p>Sprache: Deutsch (Browser). Hermes-STT verwendet die Serverkonfiguration.</p>
+        <p>Sprachausgabe: {tts?.configured ? tts.provider || 'Konfigurierter Anbieter' : 'Nicht eingerichtet'}. Stimme und Voice-ID werden serverseitig verwaltet.</p>
+        <label className="command-field">Wiedergabegeschwindigkeit · {settings.speed.toFixed(2)}×<input aria-label="Wiedergabegeschwindigkeit" type="range" min=".75" max="1.25" step=".05" value={settings.speed} onChange={event => update({ speed: Number(event.target.value) })} /></label>
+        <p role="status">{notice}</p>
       </div>
-    </div><VoiceHistory history={history} />
+    </div>
+    <section className="voice-transcript" aria-label="Sprachprotokoll">
+      <h2>Erkannt und beantwortet</h2>
+      <p>Nur in dieser Profil-Sitzung, maximal 20 Einträge. Keine zusätzliche Speicherung im Browser.</p>
+      {props.voiceHistory.length ? <ol>{props.voiceHistory.map(entry => <li key={entry.id}><time>{new Date(entry.timestamp).toLocaleTimeString('de-DE')}</time><p>{entry.text}</p><p>{entry.action}</p></li>)}</ol> : <p>Noch keine Spracheingabe.</p>}
+      <details><summary>Sprachbefehle und Grenzen</summary><p>„Jarvis, prüfe meine Emails“, „Jarvis Status“, „Sprich langsamer“. Unbekannte Eingaben werden nur als Auftrag vorbereitet. Freie Gespräche bleiben im bestehenden Hermes Chat; hier entsteht keine zweite Chat-Sitzung.</p></details>
+    </section>
   </section>
 }
-function Setting({ label, value }: { label: string; value: string }) { return <div className="mt-3 border-b border-white/10 pb-2"><p className="text-xs text-slate-500">{label}</p><p className="mt-1 text-sm text-slate-200">{value}</p></div> }
-function StatusMetric({ label, value }: { label: string; value: string }) { return <div className="border border-white/10 bg-black/20 p-2"><p>{label}</p><p className="mt-1 truncate text-cyan-100" title={value}>{value}</p></div> }
-function providerLabel(value: string | null | undefined, fallback: string): string { if (!value || value === 'not_configured' || value === 'unavailable') return fallback; return value }
-function VoiceHistory({ history }: { history: VoiceHistoryEntry[] }) { return <div className="relative mt-5 border-t border-cyan-300/15 pt-4"><p className="text-xs uppercase tracking-[.16em] text-cyan-300/80">Letzte Befehle</p>{history.length ? <ol className="mt-3 grid gap-2 md:grid-cols-2">{history.map(entry => <li key={entry.id} className="border border-white/10 bg-black/20 p-2 text-xs"><p className="text-slate-500">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · {entry.action}</p><p className="mt-1 truncate text-slate-200">{entry.text}</p></li>)}</ol> : <p className="mt-2 text-xs text-slate-500">Nur für diese Sitzung. Keine Befehle gespeichert.</p>}</div> }

@@ -1,0 +1,66 @@
+{
+  "data": "synthetic only",
+  "readyMs": 1307,
+  "initialHeavyChunks": [],
+  "dimensions": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "viewport": 1920,
+      "scroll": 1920,
+      "shell": 1635
+    },
+    {
+      "width": 1536,
+      "height": 960,
+      "viewport": 1536,
+      "scroll": 1536,
+      "shell": 1251
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "viewport": 1440,
+      "scroll": 1440,
+      "shell": 1155
+    },
+    {
+      "width": 1280,
+      "height": 800,
+      "viewport": 1280,
+      "scroll": 1280,
+      "shell": 995
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "viewport": 768,
+      "scroll": 768,
+      "shell": 723
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "viewport": 390,
+      "scroll": 390,
+      "shell": 367.5
+    }
+  ],
+  "uncaughtErrors": [],
+  "reducedMotionRunningAnimations": 0,
+  "checks": [
+    "six responsive sizes",
+    "scoped navigation",
+    "back/forward",
+    "refresh",
+    "all seven workspaces",
+    "command transfer without POST",
+    "specialist plan without execution",
+    "existing xterm mounts; PTY mocked",
+    "profile draft reset",
+    "permission denied",
+    "offline",
+    "reduced motion"
+  ],
+  "backendCalls": "intercepted; no real provider or PTY activity"
+}
