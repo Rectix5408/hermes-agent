@@ -12,7 +12,7 @@ function responseText(props: JarvisWorkspaceProps) {
   return props.voiceResponse?.trim() || props.result?.consolidated?.summary?.trim() || props.result?.results?.map(item => item.summary).filter(Boolean).join('\n').trim() || ''
 }
 
-export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
+function useVoiceConsole(props: JarvisWorkspaceProps) {
   const { profile: selectedProfile, currentProfile } = useProfileScope()
   const profile = selectedProfile || currentProfile
   const [settings, setSettings] = useState(() => loadVoiceSettings(profile))
@@ -96,7 +96,7 @@ export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
   const response = responseText(props)
   const stt = props.status?.voice.stt
   const tts = props.status?.voice.tts
-  const canStart = !locked && !disabledMode && inputAvailable && (browserMode || stt?.configured === true)
+  const canStart = !props.busy && (!props.voiceBusy || props.voiceBusy === 'speaking') && !disabledMode && inputAvailable && (browserMode || stt?.configured === true)
   const activeDeviceName = stream?.getAudioTracks()[0]?.label || chosenDevice?.label || (browserMode ? 'Standardmikrofon des Browsers' : 'Kein Mikrofon aktiv')
   const refreshDevices = async () => {
     try {
@@ -104,10 +104,14 @@ export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
       setDevices(items.filter(item => item.kind === 'audioinput')); setDeviceError('')
     } catch { setDeviceError('Mikrofonliste konnte nicht aktualisiert werden.') }
   }
-  return <section className="command-panel voice-console" aria-label="HERMES Sprachsteuerung">
-    <header><p className="text-xs uppercase tracking-widest text-cyan-300">HERMES Voice Control</p><h1>Sprich mit Jarvis</h1><p>Eine Aufnahme. Eine klare Antwort. Keine Hintergrundaufnahme.</p></header>
-    <div className="voice-layout">
-      <div className="voice-reactor">
+  return { settings, devices, permission, notice, deviceError, canvasRef, stream, locked, recording, browserMode, disabledMode, browserAvailable, inputAvailable, update, response, stt, tts, canStart, activeDeviceName, refreshDevices }
+}
+
+interface VoicePanelProps { props: JarvisWorkspaceProps; view: ReturnType<typeof useVoiceConsole> }
+
+function VoiceReactor({ props, view }: VoicePanelProps) {
+  const { stream, permission, activeDeviceName, settings, canvasRef, recording, canStart, response, locked, tts, inputAvailable, disabledMode, browserMode } = view
+  return <div className="voice-reactor">
         <AudioHologram state={props.voiceState} />
         <h2 className="mt-6" role="status">{labels[props.voiceState]}</h2>
         <dl className="operations-facts">
@@ -120,7 +124,7 @@ export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
         <div className="command-actions">
           <Button disabled={recording ? !!props.busy : !canStart} onClick={recording ? props.onStopVoice : props.onRecordVoice}>
             {props.voiceBusy === 'recording' ? <Square size={16} /> : <Mic size={16} />}
-            {props.voiceBusy === 'recording' ? 'Aufnahme beenden' : 'Zuhören starten'}
+            {recording ? 'Aufnahme beenden' : props.voiceBusy === 'speaking' ? 'Unterbrechen und sprechen' : 'Zuhören starten'}
           </Button>
           <Button outlined disabled={!props.voiceBusy} onClick={props.onCancelVoice}><X size={16} />Abbrechen</Button>
           <Button outlined disabled={!response || locked || !tts?.configured} onClick={() => response && props.onSpeak(response, settings.speed)}><Volume2 size={16} />Antwort sprechen</Button>
@@ -128,7 +132,11 @@ export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
         {props.voiceState === 'speaking' && <progress aria-label="Wiedergabefortschritt" max={1} value={Math.min(1, Math.max(0, props.voiceProgress ?? 0))} />}
         {!inputAvailable && !disabledMode && <p role="alert"><AlertCircle size={16} />{browserMode ? 'Browser Speech wird hier nicht unterstützt. Wähle Hermes-STT.' : 'Mikrofonaufnahme nicht verfügbar. Prüfe HTTPS und Browserberechtigungen.'}</p>}
       </div>
-      <div className="voice-settings">
+}
+
+function VoiceSettingsPanel({ view }: VoicePanelProps) {
+  const { settings, locked, update, stt, browserMode, devices, refreshDevices, deviceError, tts, notice } = view
+  return <div className="voice-settings">
         <h2><Headphones size={18} />Spracheinstellungen</h2>
         <label className="command-field">Spracherkennung<select value={settings.sttEngine} disabled={locked} onChange={event => update({ sttEngine: event.target.value as VoiceSettings['sttEngine'] })}>
           <option value="whisper-local">Hermes-STT (Serverkonfiguration)</option><option value="browser-speech">Browser-Spracherkennung</option><option value="disabled">Deaktiviert</option>
@@ -145,17 +153,33 @@ export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
         <label className="command-field">Wiedergabegeschwindigkeit · {settings.speed.toFixed(2)}×<input aria-label="Wiedergabegeschwindigkeit" type="range" min=".75" max="1.25" step=".05" value={settings.speed} onChange={event => update({ speed: Number(event.target.value) })} /></label>
         <p role="status">{notice}</p>
       </div>
-    </div>
-    <section className="voice-transcript" aria-label="Sprachprotokoll">
+}
+
+function VoiceTranscript({ props, view }: VoicePanelProps) {
+  const { response, locked, disabledMode, browserMode, browserAvailable, stt } = view
+  return <section className="voice-transcript" aria-label="Sprachprotokoll">
       <h2>Erkannt und beantwortet</h2>
       <p>Nur in dieser Profil-Sitzung, maximal 20 Einträge. Keine zusätzliche Speicherung im Browser.</p>
       {props.voiceHistory.length ? <ol>{props.voiceHistory.map(entry => <li key={entry.id}><time>{new Date(entry.timestamp).toLocaleTimeString('de-DE')}</time><p>{entry.text}</p><p>{entry.action}</p></li>)}</ol> : <p>Noch keine Spracheingabe.</p>}
       {response && <section aria-label="Hermes-Sprachantwort" aria-busy={props.voiceState === 'thinking'}><h3>Letzte Hermes-Antwort</h3><p className="whitespace-pre-wrap break-words">{response}</p></section>}
+      {!!props.voiceTools?.length && <section aria-label="Gemeldete Werkzeugaktivität"><h3>Werkzeugaktivität dieser Anfrage</h3><ul>{props.voiceTools.map((activity, index) => <li key={index}>{activity.name} · {activity.status === 'started' ? 'Gestartet' : 'Beendet (kein Erfolgsnachweis)'}</li>)}</ul></section>}
+      {props.onContinueVoiceInChat && <Button outlined disabled={locked} onClick={props.onContinueVoiceInChat}>Gespräch im Hermes Chat fortsetzen</Button>}
       <details><summary><ChevronDown size={16} />Technische Diagnose & Hinweise</summary>
         <p>{props.status?.ok ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{props.status?.ok ? 'Hermes-Status erreichbar' : 'Hermes-Status nicht verfügbar'}</p>
         <p>STT: {disabledMode ? 'Deaktiviert' : browserMode ? browserAvailable ? 'Browser-Erkennung verfügbar (nicht getestet)' : 'Browser-Erkennung nicht unterstützt' : stt?.configured ? `${stt.provider || 'Hermes-STT'} konfiguriert (Verfügbarkeit nicht getestet)` : 'Hermes-STT nicht konfiguriert'}</p>
-        <p>„Jarvis, prüfe meine Emails“, „Jarvis Status“, „Sprich langsamer“. Freie Spracheingaben gehen an die native Hermes-Engine. Die Sprachsitzung ist vom PTY-Chat getrennt. Gesprächspersistenz und Werkzeugrechte verwaltet Hermes; eine Freigabe erfolgt nie durch ein beiläufiges „Ja“.</p>
+        <p>„Jarvis, prüfe meine Emails“, „Jarvis Status“, „Sprich langsamer“. Freie Spracheingaben gehen an die native Hermes-Engine. Voice besitzt eine eigene Sitzung; „Gespräch im Hermes Chat fortsetzen“ übergibt denselben gespeicherten Verlauf an den PTY-Chat und beendet Voice. Kein gleichzeitiger Schreibzugriff. Gesprächspersistenz und Werkzeugrechte verwaltet Hermes; eine Freigabe erfolgt nie durch ein beiläufiges „Ja“.</p>
       </details>
     </section>
+}
+
+export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
+  const view = useVoiceConsole(props)
+  return <section className="command-panel voice-console" aria-label="HERMES Sprachsteuerung">
+    <header><p className="text-xs uppercase tracking-widest text-cyan-300">HERMES Voice Control</p><h1>Sprich mit Jarvis</h1><p>Eine Aufnahme. Eine klare Antwort. Keine Hintergrundaufnahme.</p></header>
+    <div className="voice-layout">
+      <VoiceReactor props={props} view={view} />
+      <VoiceSettingsPanel props={props} view={view} />
+    </div>
+    <VoiceTranscript props={props} view={view} />
   </section>
 }

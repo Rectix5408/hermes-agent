@@ -12,6 +12,7 @@ export interface VoiceApprovalDisplay {
   toolName: string
   allowOnce: boolean
 }
+export interface VoiceToolActivity { name: string; status: 'started' | 'finished' }
 
 type Event = { type: string; session_id?: string; payload?: unknown }
 type ServerQuestion = {
@@ -54,6 +55,37 @@ function safeDisplay(value: unknown): string {
   return typeof value === 'string' ? value.slice(0, MAX_APPROVAL_TEXT_CHARS) : ''
 }
 
+function hasInvalidControl(text: string): boolean {
+  return Array.from(text).some(char => {
+    const code = char.charCodeAt(0)
+    return code === 127 || (code < 32 && ![9, 10, 13].includes(code))
+  })
+}
+
+function completedReply(answer: CompletedPayload, streamed: string): string {
+  if (answer.status === 'error' || answer.status === 'interrupted')
+    throw new Error('Hermes konnte die Anfrage nicht erfolgreich abschließen. Bitte Provider und Verbindung prüfen.')
+  const reply = normalizedReply(answer, streamed)
+  if (!reply) throw new Error('Hermes hat keine sprechbare Antwort zurückgegeben.')
+  return reply
+}
+
+/** Bound the handshake as well as the agent turn; never leave capture locked. */
+async function connectGateway(client: VoiceGateway, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  let abort!: () => void
+  const stopped = new Promise<never>((_, reject) => {
+    abort = () => { client.close(); reject(interrupted()) }
+    signal.addEventListener('abort', abort, { once: true })
+  })
+  try {
+    await Promise.race([client.connect().then(() => {
+      // A transport may finish authenticating after the user has cancelled.
+      if (signal.aborted) { client.close(); throw interrupted() }
+    }), stopped])
+  } finally { signal.removeEventListener('abort', abort) }
+}
+
 export class HermesVoiceConversation {
   private gateway: VoiceGateway | null = null
   private sessionId = ''
@@ -62,6 +94,7 @@ export class HermesVoiceConversation {
   private disposed = false
   private initializing: Promise<void> | null = null
   private pendingApproval: PendingApproval | null = null
+  private unsubscribeConnection: (() => void) | undefined
   private readonly lifecycle = new AbortController()
   private readonly profile: string
   private readonly makeGateway: () => VoiceGateway
@@ -69,7 +102,7 @@ export class HermesVoiceConversation {
 
   constructor(profile: string, makeGateway: () => VoiceGateway,
     onApprovalChanged: (approval: VoiceApprovalDisplay | null) => void = () => {}) {
-    if (!profile || /[\x00-\x20\x7f/?#\\]/.test(profile)) throw new Error('Ungültiges Hermes-Profil')
+    if (!profile || hasInvalidControl(profile) || /[\s/?#\\]/.test(profile)) throw new Error('Ungültiges Hermes-Profil')
     this.profile = profile
     this.makeGateway = makeGateway
     this.onApprovalChanged = onApprovalChanged
@@ -112,10 +145,19 @@ export class HermesVoiceConversation {
     if (this.disposed) throw new Error('Die Jarvis-Sprachsitzung wurde geschlossen.')
     if (this.sessionId) return
     if (this.initializing) return this.initializing
+    signal = AbortSignal.any([signal, AbortSignal.timeout(45_000)])
     this.initializing = (async () => {
       const client = this.gateway ?? this.makeGateway()
       this.gateway = client
-      await client.connect()
+      this.unsubscribeConnection?.()
+      this.unsubscribeConnection = client.onState?.(state => {
+        if ((state === 'closed' || state === 'error') && !this.active) {
+          // A dropped idle connection must not consume the next spoken turn.
+          this.sessionId = ''
+          this.gateway = null
+        }
+      })
+      await connectGateway(client, signal)
       if (signal.aborted) throw interrupted()
       const result = await client.request<SessionCreated>(this.storedSessionId ? 'session.resume' : 'session.create', {
         profile: this.profile,
@@ -128,6 +170,8 @@ export class HermesVoiceConversation {
       this.sessionId = result.session_id
       this.storedSessionId = result.stored_session_id
     })().catch(error => {
+      this.unsubscribeConnection?.()
+      this.unsubscribeConnection = undefined
       this.gateway?.close()
       this.gateway = null
       throw error
@@ -135,11 +179,11 @@ export class HermesVoiceConversation {
     return this.initializing
   }
 
-  async submit(spokenText: string, signal?: AbortSignal, onTextChanged: (text: string) => void = () => {}): Promise<VoiceTurnResult> {
+  async submit(spokenText: string, signal?: AbortSignal, onTextChanged: (text: string) => void = () => {}, onToolActivity: (activity: VoiceToolActivity) => void = () => {}): Promise<VoiceTurnResult> {
     if (this.active) throw new Error('Jarvis bearbeitet bereits eine Sprachanfrage.')
     if (this.disposed) throw new Error('Die Jarvis-Sprachsitzung wurde geschlossen.')
     const text = spokenText.trim()
-    if (!text || text.length > MAX_INPUT_CHARS || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text))
+    if (!text || text.length > MAX_INPUT_CHARS || hasInvalidControl(text))
       throw new Error('Der erkannte Sprachtext ist leer, zu lang oder ungültig.')
     if (signal?.aborted) throw interrupted()
     signal = AbortSignal.any([this.lifecycle.signal, ...(signal ? [signal] : [])])
@@ -217,15 +261,17 @@ export class HermesVoiceConversation {
             }
           }
           if (event.type === 'message.complete') settle((event.payload ?? {}) as CompletedPayload)
+          if (event.type === 'tool.start' || event.type === 'tool.complete') {
+            const payload = event.payload as { name?: unknown } | undefined
+            if (typeof payload?.name === 'string') onToolActivity({ name: payload.name.slice(0, 100), status: event.type === 'tool.start' ? 'started' : 'finished' })
+          }
         })
-        if (signal) {
-          abortHandler = () => {
+        abortHandler = () => {
             this.denyPending('Voice request aborted')
             fail(interrupted())
             void gateway.request('session.interrupt', { profile: this.profile, session_id: sessionId }).catch(() => {})
           }
-          signal.addEventListener('abort', abortHandler, { once: true })
-        }
+        signal.addEventListener('abort', abortHandler, { once: true })
         timeout = setTimeout(() => {
           this.denyPending('Voice request timed out')
           fail(new Error('Hermes hat die Sprachanfrage nicht rechtzeitig abgeschlossen.'))
@@ -244,10 +290,7 @@ export class HermesVoiceConversation {
         if (signal?.aborted || this.disposed) throw interrupted()
         if (this.pendingApproval) throw new Error('Hermes hat eine offene Freigabe nicht abgeschlossen.')
         if (unsupportedQuestion) throw new Error('Hermes benötigt eine nicht unterstützte Eingabe. Bitte den regulären Chat verwenden.')
-        if (answer.status === 'error' || answer.status === 'interrupted')
-          throw new Error('Hermes konnte die Anfrage nicht erfolgreich abschließen. Bitte Provider und Verbindung prüfen.')
-        const reply = normalizedReply(answer, streamed)
-        if (!reply) throw new Error('Hermes hat keine sprechbare Antwort zurückgegeben.')
+        const reply = completedReply(answer, streamed)
         return { text: reply, sessionId, storedSessionId: this.storedSessionId }
       } catch (error) {
         this.denyPending('Voice turn terminated')
@@ -261,7 +304,7 @@ export class HermesVoiceConversation {
         throw error
       } finally {
         if (timeout !== undefined) clearTimeout(timeout)
-        if (signal && abortHandler) signal.removeEventListener('abort', abortHandler)
+        if (abortHandler) signal.removeEventListener('abort', abortHandler)
         unsubscribeEvent?.()
         unsubscribeQuestion?.()
         unsubscribeState?.()
@@ -269,10 +312,29 @@ export class HermesVoiceConversation {
     } finally { this.active = false }
   }
 
+  /** Release the single-writer lease before the existing PTY resumes this row. */
+  async releaseForChat(signal: AbortSignal): Promise<string> {
+    if (this.active || this.disposed || !this.storedSessionId) throw new Error('Sprachsitzung ist nicht zur Übergabe bereit.')
+    signal = AbortSignal.any([signal, this.lifecycle.signal])
+    signal.throwIfAborted()
+    this.active = true
+    try {
+      await this.ensureSession(signal)
+      const result = await this.gateway!.request<{ closed: boolean }>('session.close', { profile: this.profile, session_id: this.sessionId }, 45_000, signal)
+      signal.throwIfAborted()
+      if (typeof result.closed !== 'boolean') throw new Error('Sitzungsabschluss wurde nicht bestätigt.')
+      const id = this.storedSessionId
+      this.close()
+      return id
+    } finally { this.active = false }
+  }
+
   close(): void {
     this.denyPending('Voice client closed')
     this.disposed = true
     this.lifecycle.abort()
+    this.unsubscribeConnection?.()
+    this.unsubscribeConnection = undefined
     this.gateway?.close()
     this.gateway = null
     this.sessionId = ''

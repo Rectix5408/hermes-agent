@@ -6,14 +6,13 @@ import { Toast } from '@nous-research/ui/ui/components/toast'
 import { useToast } from '@nous-research/ui/hooks/use-toast'
 import { api } from '@/lib/api'
 import { GatewayClient } from '@/lib/gatewayClient'
-import { HermesVoiceConversation, type VoiceApprovalDisplay } from './jarvis/voice-runtime/hermes-conversation'
+import { HermesVoiceConversation, type VoiceApprovalDisplay, type VoiceToolActivity } from './jarvis/voice-runtime/hermes-conversation'
 import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
 import { ApiError, errorMessage } from '@/lib/api-error'
 import { useProfileScope } from '@/contexts/useProfileScope'
 import { usePageHeader } from '@/contexts/usePageHeader'
 import { JarvisShell } from './jarvis/JarvisShell'
 import { emit } from './jarvis/runtime/event-bus'
-import { routeVoiceCommand } from './jarvis/cinematic/voice-command-router'
 import { captureMicrophone, captureBrowserSpeech } from './jarvis/voice-runtime/microphone'
 import { applyVoiceSpeedCommand, loadVoiceSettings } from './jarvis/cinematic/voice-settings'
 import { appendVoiceHistory, microphoneErrorMessage, transitionVoiceState, type ProductionVoiceState, type VoiceHistoryEntry } from './jarvis/voice-runtime/production-state'
@@ -67,6 +66,9 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   const [voiceProgress, setVoiceProgress] = useState(0)
   const [voiceApproval, setVoiceApproval] = useState<VoiceApprovalDisplay | null>(null)
   const conversation = useRef<HermesVoiceConversation | null>(null)
+  const [voiceSessionReady, setVoiceSessionReady] = useState(false)
+  const [voiceTools, setVoiceTools] = useState<VoiceToolActivity[]>([])
+  const ttsSignal = useRef<AbortSignal | null>(null)
   const voiceOperation = useRef<AbortController | null>(null)
   const captureStop = useRef<(() => void) | null>(null)
   const runLock = useRef(false)
@@ -79,6 +81,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     captureStop.current?.()
     captureStop.current = null
     playerRef.current?.pause()
+    ttsSignal.current = null
     setVoiceStream(null)
     setVoiceResponse('')
     setVoiceBusy(null)
@@ -157,6 +160,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     }
     const signal = providedSignal ?? operation!.signal
     if (signal.aborted) return
+    ttsSignal.current = signal
     setVoiceProgress(0)
     setVoiceBusy('speaking')
     setVoicePhase('speaking')
@@ -168,7 +172,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         playerRef.current = player
         player.playbackRate = speed
         const aborted = () => { player.pause(); cleanup(); resolve() }
-        const cleanup = () => { signal.removeEventListener('abort', aborted); player.onended = null; player.onerror = null; player.ontimeupdate = null }
+        const cleanup = () => { signal.removeEventListener('abort', aborted); player.onended = null; player.onerror = null; player.ontimeupdate = null; if (playerRef.current === player) playerRef.current = null }
         signal.addEventListener('abort', aborted, { once: true })
         player.ontimeupdate = () => { if (Number.isFinite(player.duration) && player.duration > 0) setVoiceProgress(player.currentTime / player.duration) }
         player.onended = () => { cleanup(); setVoiceProgress(1); resolve() }
@@ -180,6 +184,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       setError(err instanceof DOMException && err.name === 'NotAllowedError' ? 'Wiedergabe vom Browser blockiert. Bitte „Antwort sprechen“ anklicken.' : 'Sprachausgabe nicht verfügbar. Bitte TTS-Konfiguration prüfen.')
       setVoicePhase('error')
     } finally {
+      if (ttsSignal.current === signal) ttsSignal.current = null
       if (operation && voiceOperation.current === operation) voiceOperation.current = null
       if (!signal.aborted) {
         setVoiceBusy(null)
@@ -240,44 +245,36 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   const executeVoiceCommand = async (transcript: string, signal: AbortSignal): Promise<string> => {
     const speed = applyVoiceSpeedCommand(transcript, profile)
     if (speed) return `Sprechgeschwindigkeit auf ${speed.speed.toFixed(2)} angepasst.`
-    const command = routeVoiceCommand(transcript)
-    if (!command) {
-      setVoiceBusy('thinking')
-      setVoicePhase('thinking')
-      if (!conversation.current) conversation.current = new HermesVoiceConversation(profile, () => new GatewayClient(), setVoiceApproval)
-      const reply = await conversation.current.submit(transcript, signal, text => {
-        if (!signal.aborted && !lifetime.current.signal.aborted) setVoiceResponse(text)
-      })
-      return reply.text
-    }
-    const hints = command.agentHint === 'email' ? ['email', 'mail'] : [command.agentHint]
-    const matchingAgent = status?.agents.find(agent => hints.includes(agent.agent_id.toLowerCase()))?.agent_id
-    if (command.execute && !matchingAgent) return 'Der benötigte Agent ist in diesem Profil nicht registriert. Es wurde nichts ausgeführt.'
-    setRequest(command.request)
-    setSelectedAgent(matchingAgent ?? 'auto')
-    emit({ profile, source: 'voice', type: 'VOICE_COMMAND_ROUTED', status: 'completed', payload: { agent: matchingAgent ?? 'auto' } })
-    if (command.execute) {
-      setVoiceBusy('thinking'); setVoicePhase('thinking')
-      return await run('run', { request: command.request, agentId: matchingAgent! }, signal, true) || 'Keine neue Ausführung gestartet.'
-    }
-    await refresh()
-    return command.response
+    // Preserve the user's intent and conversation context. The native agent,
+    // not a keyword shortcut, owns tool selection and authorization.
+    setVoiceBusy('thinking')
+    setVoicePhase('thinking')
+    if (!conversation.current) conversation.current = new HermesVoiceConversation(profile, () => new GatewayClient(), setVoiceApproval)
+    const reply = await conversation.current.submit(transcript, signal, text => {
+      if (!signal.aborted && !lifetime.current.signal.aborted) setVoiceResponse(text)
+    }, activity => {
+      if (!signal.aborted && !lifetime.current.signal.aborted) setVoiceTools(items => [...items, activity].slice(-20))
+    })
+    if (!signal.aborted) setVoiceSessionReady(true)
+    return reply.text
   }
 
   const processVoiceTranscript = async (transcript: string, signal = lifetime.current.signal) => {
     if (signal.aborted || !transcript.trim()) return
     setVoicePhase('processing')
     setVoiceResponse('')
+    setVoiceTools([])
     setRequest(transcript)
     const action = await executeVoiceCommand(transcript, signal)
     if (signal.aborted) return
     setVoiceHistory(history => appendVoiceHistory(history, transcript, action))
     setVoiceResponse(action)
     if (status?.voice?.tts.configured) await speak(action, loadVoiceSettings(profile).speed, signal)
-    setVoiceState(current => current === 'error' ? current : 'idle')
+    if (!signal.aborted) setVoiceState(current => current === 'error' ? current : 'idle')
   }
 
   const recordVoice = async () => {
+    if (ttsSignal.current) cancelVoice()
     if (lifetime.current.signal.aborted || voiceOperation.current || runLock.current) return
     const settings = loadVoiceSettings(profile)
     if (settings.sttEngine === 'disabled') { setError('Bitte eine Spracherkennung auswählen.'); return }
@@ -287,7 +284,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     setVoiceBusy('recording')
     setVoiceState('listening')
     setError('')
-    let transcribing = false
+    let stage: 'microphone' | 'stt' | 'agent' = 'microphone'
     try {
       const capture = settings.sttEngine === 'browser-speech'
         ? captureBrowserSpeech(signal)
@@ -297,7 +294,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       if (signal.aborted) return
       setVoiceBusy('transcribing')
       setVoicePhase('processing')
-      transcribing = true
+      stage = 'stt'
       let transcript: string
       if (typeof audio === 'string') transcript = audio
       else {
@@ -309,10 +306,16 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       if (signal.aborted) return
       if (!transcript.trim()) throw new Error('Keine Sprache erkannt. Bitte erneut sprechen.')
       emit({ profile, source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed' })
+      stage = 'agent'
       await processVoiceTranscript(transcript, signal)
     } catch (err) {
       if (!signal.aborted) {
-        setError(transcribing ? 'Spracherkennung oder Auftrag fehlgeschlagen. Bitte Provider und Verbindung prüfen.' : err instanceof DOMException ? microphoneErrorMessage(err) : err instanceof Error ? err.message : 'Aufnahme nicht verfügbar.')
+        const messages = {
+          microphone: err instanceof DOMException ? microphoneErrorMessage(err) : 'Mikrofonaufnahme nicht verfügbar. Bitte Browser und Eingabegerät prüfen.',
+          stt: 'Spracherkennung fehlgeschlagen oder keine Sprache erkannt. Bitte STT-Anbieter und Verbindung prüfen.',
+          agent: 'Hermes konnte den Sprachturn nicht abschließen. Bitte Modellanbieter und Gateway-Verbindung prüfen. Es wird nichts automatisch wiederholt.',
+        }
+        setError(messages[stage])
         setVoiceState('error')
       }
     } finally {
@@ -326,6 +329,24 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   }
 
   const stopVoice = () => { captureStop.current?.() }
+
+  const continueVoiceInChat = async () => {
+    if (!conversation.current || voiceOperation.current || runLock.current) return
+    const operation = new AbortController()
+    voiceOperation.current = operation
+    setVoiceBusy('thinking')
+    try {
+      const id = await conversation.current.releaseForChat(operation.signal)
+      if (lifetime.current.signal.aborted) return
+      conversation.current = null
+      setVoiceSessionReady(false)
+      navigate(`/chat?${new URLSearchParams({ resume: id, profile })}`)
+    } catch {
+      if (!operation.signal.aborted) setError('Sitzung konnte nicht sicher an den Chat übergeben werden. Es wurde kein zweiter Chat gestartet.')
+    } finally {
+      if (voiceOperation.current === operation) { voiceOperation.current = null; setVoiceBusy(null) }
+    }
+  }
 
   const submitVoiceTranscript = async (transcript: string) => {
     if (voiceOperation.current || runLock.current || lifetime.current.signal.aborted) return
@@ -391,6 +412,8 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         voiceResponse={voiceResponse}
         voiceProgress={voiceProgress}
         voiceApproval={voiceApproval}
+        voiceTools={voiceTools}
+        onContinueVoiceInChat={voiceSessionReady ? continueVoiceInChat : undefined}
         onVoiceApprovalDecision={(id, choice) => { conversation.current?.decideApproval(id, choice) }}
         onCancelVoice={cancelVoice}
         approvalBusy={approvalBusy}

@@ -4,6 +4,7 @@ declare module 'three' {
     x: number
     y: number
     z: number
+    lengthSq(): number
     lerp(target: Vector3, alpha: number): Vector3
     set(x: number, y: number, z: number): Vector3
   }
@@ -17,8 +18,10 @@ declare module 'three' {
     dispose(): void
   }
   export class Float32BufferAttribute { constructor(values: number[], itemSize: number) }
-  export class Mesh { rotation: { x: number; z: number } }
+  export class Mesh { rotation: { x: number; y: number; z: number } }
   export class InstancedMesh {
+    count: number
+    computeBoundingSphere(): void
     setMatrixAt(index: number, matrix: Matrix4): void
     setColorAt(index: number, color: Color): void
     instanceMatrix: { needsUpdate: boolean }

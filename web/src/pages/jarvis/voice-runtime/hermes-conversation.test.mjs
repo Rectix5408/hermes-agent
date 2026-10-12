@@ -42,6 +42,46 @@ function fresh() {
   return {gateway, session, approvals}
 }
 
+test('tool activity is session-bound metadata, never raw arguments or results', async () => {
+  const {gateway:g,session}=fresh();const activity=[]
+  const turn=session.submit('Auftrag',undefined,()=>{},item=>activity.push(item));await settle()
+  g.emit('tool.start',{name:'foreign'},'other')
+  g.emit('tool.start',{name:17})
+  g.emit('tool.start',{name:'terminal',args:{secret:'private'}})
+  g.emit('tool.complete',{name:'terminal',result:'private',error:true})
+  assert.deepEqual(activity,[{name:'terminal',status:'started'},{name:'terminal',status:'finished'}])
+  g.emit('message.complete',{text:'Fertig',status:'complete'});await turn
+  g.emit('tool.start',{name:'late'})
+  assert.equal(activity.length,2);session.close()
+})
+
+test('chat handoff waits for the lease release and returns only the same stored session', async () => {
+  const {gateway:g,session}=fresh()
+  const turn=session.submit('Hallo');await settle()
+  await assert.rejects(session.releaseForChat(new AbortController().signal),/nicht zur Übergabe/)
+  g.emit('message.complete',{text:'Hallo',status:'complete'});await turn
+  let finish
+  g.request=async(method,params)=>{g.calls.push({method,params});return new Promise(resolve=>{finish=resolve})}
+  const handoff=session.releaseForChat(new AbortController().signal);await settle()
+  assert.deepEqual(g.calls.at(-1),{method:'session.close',params:{profile:'default',session_id:'s-42'}})
+  assert.equal(g.closed,false)
+  await assert.rejects(session.submit('Parallel'),/bereits/)
+  finish({closed:true})
+  assert.equal(await handoff,'db-42');assert.equal(g.closed,true)
+  await assert.rejects(session.submit('Weiter'),/geschlossen/)
+})
+
+test('unconfirmed and cancelled handoffs never return a chat session', async () => {
+  const {gateway:g,session}=fresh();const turn=session.submit('Hallo');await settle()
+  g.emit('message.complete',{text:'Hallo',status:'complete'});await turn
+  g.request=async()=>({status:'unknown'})
+  await assert.rejects(session.releaseForChat(new AbortController().signal),/nicht bestätigt/)
+  const controller=new AbortController()
+  g.request=async()=>{controller.abort();return {closed:true}}
+  await assert.rejects(session.releaseForChat(controller.signal),{name:'AbortError'})
+  session.close()
+})
+
 // Native voice conversations: still no model/backend call in these tests.
 test('real gateway stream returns authoritative text', async () => {
   const {gateway:g,session}=fresh()
@@ -212,4 +252,36 @@ test('next explicit turn resumes only its own stored session after disconnect', 
   assert.equal(g.calls.find(x=>x.method==='session.resume').params.session_id,'db-42')
   g.emit('message.complete',{text:'wrong'},'s-42');g.emit('message.complete',{text:'Neu'},'s-43')
   assert.equal((await next).text,'Neu');session.close()
+})
+
+test('idle disconnect resumes before submitting the next turn, without losing its text', async () => {
+  const {gateway:g,session}=fresh();const request=g.request.bind(g)
+  g.request=async(method,params)=>method==='session.resume'
+    ? (g.calls.push({method,params}),{session_id:'s-new',stored_session_id:'db-42'}) : request(method,params)
+  const first=session.submit('Hallo');await settle();g.emit('message.complete',{text:'Hallo'});await first
+  g.state('closed')
+  const next=session.submit('Meine Folgefrage');await settle()
+  assert.deepEqual(g.calls.filter(x=>x.method==='prompt.submit').map(x=>x.params.text),['Hallo','Meine Folgefrage'])
+  assert.equal(g.calls.at(-1).params.session_id,'s-new')
+  g.emit('message.complete',{text:'Mit Kontext'},'s-new');await next;session.close()
+  assert.equal(g.states.size,0)
+})
+
+test('turn deadline interrupts once and never repeats the prompt', async t => {
+  t.mock.timers.enable({apis:['setTimeout']})
+  const {gateway:g,session}=fresh();const turn=session.submit('Aufgabe');await settle()
+  const rejection=assert.rejects(turn,/rechtzeitig/)
+  t.mock.timers.tick(180_001);await rejection
+  assert.equal(g.calls.filter(x=>x.method==='session.interrupt').length,1)
+  assert.equal(g.calls.filter(x=>x.method==='prompt.submit').length,1)
+  assert.equal(g.handlers.size,0);session.close()
+})
+
+test('abort during handshake settles promptly and never creates a late session', async () => {
+  const {gateway:g,session}=fresh();let connected
+  g.connect=()=>new Promise(resolve=>{connected=resolve})
+  const controller=new AbortController();const turn=session.submit('Hallo',controller.signal)
+  await settle();controller.abort();await assert.rejects(turn,/abgebrochen/)
+  connected();await settle()
+  assert.equal(g.calls.length,0);assert.equal(g.closed,true);session.close()
 })

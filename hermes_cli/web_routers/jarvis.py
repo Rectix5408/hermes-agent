@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
-import fcntl
 import uuid
 from collections import deque
 from contextlib import contextmanager
@@ -257,6 +256,8 @@ def _approvals_path() -> Path:
 @contextmanager
 def _approval_file_lock():
     """Serialize approval mutations between requests and server workers (POSIX)."""
+    import fcntl
+
     lock_path = _approvals_path().with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # A separate lock inode survives atomic replacement of approvals.json.

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useLocation } from 'react-router'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { ProfileContext } from '@/contexts/profile-context'
 import { ApiError } from '@/lib/api-error'
@@ -29,8 +29,12 @@ import JarvisPage from './JarvisPage'
 let root: Root
 let host: HTMLDivElement
 const status = { ok: true, config: {}, agents: [], runs: [], approvals: { pending: [] } } as unknown as JarvisStatusResponse
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="location">{location.pathname}{location.search}</output>
+}
 async function render(profile: string) {
-  await act(async () => root.render(<MemoryRouter><ProfileContext.Provider value={{ profile, currentProfile: profile, profiles: [profile], setProfile: () => {} }}><JarvisPage /></ProfileContext.Provider></MemoryRouter>))
+  await act(async () => root.render(<MemoryRouter><LocationProbe /><ProfileContext.Provider value={{ profile, currentProfile: profile, profiles: [profile], setProfile: () => {} }}><JarvisPage /></ProfileContext.Provider></MemoryRouter>))
 }
 beforeEach(() => {
   vi.clearAllMocks()
@@ -47,6 +51,56 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals() })
 
 describe('Jarvis session boundary', () => {
+  it('interrupts TTS on an explicit microphone click without an old turn resetting the new recording', async () => {
+    mocked.getJarvisStatus.mockResolvedValue({ ...status, voice: { tts: { configured: true } } })
+    mocked.speakText.mockResolvedValue({ data_url: 'data:audio/wav;base64,AA==' })
+    const pause = vi.fn()
+    class Player {
+      playbackRate = 1; onended = null; onerror = null; ontimeupdate = null
+      pause = pause
+      play() { return Promise.resolve() }
+    }
+    vi.stubGlobal('Audio', Player)
+    mocked.captureMicrophone.mockImplementation((_device, signal: AbortSignal) => ({
+      recording: new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })), stop: vi.fn(),
+    }))
+    await render('A')
+    let turn: unknown
+    act(() => { turn = seam.props!.onVoiceTranscript('Hallo') })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => gateway.onAny.mock.calls.at(-1)![0]({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Antwort', status: 'complete' } }))
+    expect(seam.props!.voiceState).toBe('speaking')
+    const oldSignal = mocked.speakText.mock.calls.at(-1)![2] as AbortSignal
+    let recording: unknown
+    act(() => { recording = seam.props!.onRecordVoice() })
+    await act(async () => { await turn })
+    expect(oldSignal.aborted).toBe(true)
+    expect(pause).toHaveBeenCalled()
+    expect(seam.props!.voiceState).toBe('listening')
+    expect(seam.props!.voiceBusy).toBe('recording')
+    await act(async () => seam.props!.onRecordVoice())
+    expect(mocked.captureMicrophone).toHaveBeenCalledTimes(1)
+    await act(async () => { seam.props!.onCancelVoice?.(); await recording })
+    expect(seam.props!.voiceBusy).toBeNull()
+    expect(gateway.request.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+  })
+  it('opens the same stored conversation in PTY chat only after a confirmed session close', async () => {
+    await render('A')
+    let turn: unknown
+    act(() => { turn = seam.props!.onVoiceTranscript('Hallo') })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { gateway.onAny.mock.calls.at(-1)![0]({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Antwort', status: 'complete' } }); await turn })
+    let acknowledge!: (value: unknown) => void
+    gateway.request.mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve }))
+    let handoff: unknown
+    act(() => { handoff = seam.props!.onContinueVoiceInChat?.() })
+    await act(async () => { await Promise.resolve() })
+    expect(host.querySelector('[data-testid="location"]')?.textContent).toBe('/')
+    expect(gateway.request).toHaveBeenLastCalledWith('session.close', { profile: 'A', session_id: 'voice-A' }, 45000, expect.any(AbortSignal))
+    await act(async () => { acknowledge({ closed: true }); await handoff })
+    expect(host.querySelector('[data-testid="location"]')?.textContent).toBe('/chat?resume=stored-A&profile=A')
+    expect(seam.props!.onContinueVoiceInChat).toBeUndefined()
+  })
   it('streams native dialogue, reuses the voice session and never routes it to the task planner', async () => {
     await render('A')
     let turn!: unknown
@@ -133,12 +187,15 @@ describe('Jarvis session boundary', () => {
     await act(async () => root.render(null))
     expect(signal.aborted).toBe(true)
   })
-  it('routes a recorded read-only command to the registered agent and speaks its actual result', async () => {
+  it('routes recorded mail requests through the native conversation and speaks the returned result', async () => {
     const configured = { ...status, agents: [{ agent_id: 'email', title: 'Mail' }], voice: { tts: { configured: true } } } as unknown as JarvisStatusResponse
     mocked.getJarvisStatus.mockResolvedValue(configured)
     mocked.captureMicrophone.mockReturnValue({ recording: Promise.resolve(new Blob(['synthetic'], { type: 'audio/mp4' })), stop: vi.fn() })
     mocked.transcribeAudio.mockResolvedValue({ transcript: 'Jarvis, prüfe meine Emails' })
-    mocked.runJarvisAgent.mockResolvedValue({ agent_id: 'email', status: 'completed', summary: 'Synthetisches Agentenergebnis', approval_required: [] })
+    gateway.onAny.mockImplementationOnce(handler => {
+      queueMicrotask(() => handler({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Synthetisches Agentenergebnis', status: 'complete' } }))
+      return vi.fn()
+    })
     mocked.speakText.mockResolvedValue({ data_url: 'data:audio/wav;base64,AA==' })
     class Player {
       playbackRate = 1; onended: (() => void) | null = null; onerror = null; ontimeupdate = null
@@ -149,18 +206,50 @@ describe('Jarvis session boundary', () => {
     await render('A')
     await act(async () => seam.props!.onRecordVoice())
     expect(mocked.transcribeAudio).toHaveBeenCalledWith(expect.stringContaining('data:'), 'audio/mp4', 'A', expect.any(AbortSignal))
-    expect(mocked.runJarvisAgent).toHaveBeenCalledWith('email', expect.any(Object), 'A', expect.any(AbortSignal))
+    expect(mocked.runJarvisAgent).not.toHaveBeenCalled()
+    expect(gateway.request).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({ text: 'Jarvis, prüfe meine Emails', profile: 'A', voice_turn: true }), 45000, expect.any(AbortSignal))
     expect(mocked.speakText).toHaveBeenCalledWith('Synthetisches Agentenergebnis', 'A', expect.any(AbortSignal))
     expect(seam.props!.voiceResponse).toBe('Synthetisches Agentenergebnis')
     expect(seam.props!.voiceBusy).toBeNull()
     expect(seam.props!.voiceState).toBe('idle')
   })
-  it('never falls back to automatic agent execution when a spoken specialist is absent', async () => {
+  it.each(['Jarvis, prüfe meine Emails', 'Jarvis Status', 'Jarvis, fasse meinen Tag zusammen'])('lets Hermes resolve available tools for %s without static shortcut responses', async text => {
+    gateway.onAny.mockImplementationOnce(handler => {
+      queueMicrotask(() => handler({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Antwort aus der Test-Laufzeit', status: 'complete' } }))
+      return vi.fn()
+    })
     await render('A')
-    await act(async () => seam.props!.onVoiceTranscript('Jarvis, prüfe meine Emails'))
+    await act(async () => seam.props!.onVoiceTranscript(text))
     expect(mocked.runJarvisAgent).not.toHaveBeenCalled()
     expect(mocked.runJarvis).not.toHaveBeenCalled()
-    expect(seam.props!.voiceResponse).toContain('nicht registriert')
+    expect(seam.props!.voiceResponse).toBe('Antwort aus der Test-Laufzeit')
+    expect(gateway.request).toHaveBeenCalledWith('prompt.submit', expect.objectContaining({ text }), 45000, expect.any(AbortSignal))
+  })
+  it('reports STT failure without submitting a prompt or exposing provider diagnostics', async () => {
+    mocked.captureMicrophone.mockReturnValue({ recording: Promise.resolve(new Blob(['synthetic'])), stop: vi.fn() })
+    mocked.transcribeAudio.mockRejectedValueOnce(new Error('private provider diagnostic'))
+    await render('A')
+    await act(async () => seam.props!.onRecordVoice())
+    expect(seam.props!.error).toContain('STT-Anbieter')
+    expect(seam.props!.error).not.toContain('private')
+    expect(gateway.request).not.toHaveBeenCalled()
+    expect(seam.props!.voiceState).toBe('error')
+  })
+  it('keeps the model answer when TTS fails, without replaying the turn', async () => {
+    mocked.getJarvisStatus.mockResolvedValue({ ...status, voice: { tts: { configured: true } } })
+    gateway.onAny.mockImplementationOnce(handler => {
+      queueMicrotask(() => handler({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Echte Transportantwort im Test' } }))
+      return vi.fn()
+    })
+    mocked.speakText.mockRejectedValueOnce(new Error('private audio diagnostic'))
+    await render('A')
+    await act(async () => seam.props!.onVoiceTranscript('Kannst du mich hören?'))
+    expect(seam.props!.voiceResponse).toBe('Echte Transportantwort im Test')
+    expect(seam.props!.error).toContain('TTS-Konfiguration')
+    expect(seam.props!.error).not.toContain('private')
+    expect(gateway.request.mock.calls.filter(([method]) => method === 'prompt.submit')).toHaveLength(1)
+    expect(mocked.speakText).toHaveBeenCalledTimes(1)
+    expect(seam.props!.voiceState).toBe('error')
   })
   it('cancels an in-flight transcription when leaving voice and ignores the late command', async () => {
     let finish!: (value: unknown) => void
