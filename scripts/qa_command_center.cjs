@@ -10,6 +10,7 @@ const { join } = require('node:path')
 const base = process.argv[2] || 'http://127.0.0.1:5174'
 const output = process.argv[3] || mkdtempSync(join(tmpdir(), 'hermes-command-center-qa-'))
 const operations = process.argv.includes('--operations')
+const browserExecutable = process.argv.find(arg => arg.startsWith('--browser-executable='))?.slice('--browser-executable='.length)
 const status = {
   ok: true, skill: { available: true, name: 'qa', path: '' },
   orchestrator: { available: true, schema: 'jarvis.multi_agent.v1', path: '', error: '' },
@@ -22,7 +23,7 @@ const status = {
 }
 ;(async () => {
   mkdirSync(output, { recursive: true })
-  const browser = await chromium.launch({ headless: true, args: ['--use-gl=swiftshader', '--enable-webgl', '--ignore-gpu-blocklist', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] })
+  const browser = await chromium.launch({ headless: true, ...(browserExecutable ? { executablePath: browserExecutable } : process.argv.includes('--chrome') ? { channel: 'chrome' } : {}), args: ['--use-gl=swiftshader', '--enable-webgl', '--ignore-gpu-blocklist', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] })
   try {
     const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } })
     await page.addInitScript(() => {
@@ -190,6 +191,12 @@ const status = {
     await page.locator('.command-core[data-state="OFFLINE"]').waitFor()
     await page.screenshot({ path: output + '/command-offline.png' })
     await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.screenshot({ path: output + '/command-reduced-motion.png' })
+    // Media emulation is asynchronous; wait for CSS to apply, not a fixed delay.
+    await page.waitForFunction(() => document.querySelector('.jarvis-command-shell').getAnimations({ subtree: true }).every(animation => animation.playState !== 'running'), null, { timeout: 3000 }).catch(async error => {
+      console.error(await page.locator('.jarvis-command-shell').evaluate(element => element.getAnimations({ subtree: true }).filter(a => a.playState === 'running').map(a => ({ name: a.animationName, timing: a.effect.getTiming(), target: a.effect.target?.className, pseudo: a.effect.pseudoElement, reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, before: getComputedStyle(a.effect.target, '::before').animationName, after: getComputedStyle(a.effect.target, '::after').animationName, own: getComputedStyle(a.effect.target).animationName, inside: element.contains(a.effect.target), connected: a.effect.target.isConnected }))))
+      throw error
+    })
     const animations = await page.locator('.jarvis-command-shell').evaluate(element => element.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length)
     assert.equal(animations, 0)
     assert.deepEqual(failures, [])
