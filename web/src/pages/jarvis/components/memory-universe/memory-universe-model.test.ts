@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MEMORY_UNIVERSE_LIMITS, nodePosition, semanticLevel, visibleNodes } from './memory-universe-model'
+import { isEmptyMemoryUniverse, MEMORY_UNIVERSE_LIMITS, nodePosition, semanticLevel, visibleNodes } from './memory-universe-model'
 import type { MemoryUniverseNode } from '@/lib/api-memory-universe'
 
 const node: MemoryUniverseNode = {
@@ -8,6 +8,12 @@ const node: MemoryUniverseNode = {
 }
 
 describe('memory universe model', () => {
+  it('treats a settled zero-node profile as an honest empty universe', () => {
+    expect(isEmptyMemoryUniverse([], true)).toBe(false)
+    expect(isEmptyMemoryUniverse([], false)).toBe(true)
+    expect(isEmptyMemoryUniverse([node], false)).toBe(false)
+  })
+
   it('uses deterministic positions and bounded visible nodes', () => {
     expect(nodePosition(node, 0, 1)).toEqual(nodePosition(node, 0, 1))
     expect(visibleNodes(Array.from({ length: 1_000 }, () => node))).toHaveLength(MEMORY_UNIVERSE_LIMITS.maxVisibleNodes)

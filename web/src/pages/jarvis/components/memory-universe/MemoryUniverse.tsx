@@ -5,7 +5,7 @@ import { api } from '@/lib/api'
 import type { MemoryUniverseCluster, MemoryUniverseEdge, MemoryUniverseNode, MemoryUniverseStats } from '@/lib/api-memory-universe'
 import type { JarvisWorkspaceProps } from '../../shell-types'
 import { MemoryUniverseScene } from './MemoryUniverseScene'
-import { MEMORY_UNIVERSE_LIMITS, semanticLevel } from './memory-universe-model'
+import { isEmptyMemoryUniverse, MEMORY_UNIVERSE_LIMITS, semanticLevel } from './memory-universe-model'
 
 type NodePage = { profile: string; nodes: MemoryUniverseNode[]; next_cursor: string | null; has_more: boolean }
 
@@ -55,6 +55,7 @@ export function MemoryUniverse({ status, busy, onNavigate }: Pick<JarvisWorkspac
   const reducedMotion = useReducedMotion()
   const selected = useMemo(() => nodes.find(node => node.id === selectedNodeId) ?? searchResults.find(node => node.id === selectedNodeId) ?? null, [nodes, searchResults, selectedNodeId])
   const level = semanticLevel(selectedClusterId, selectedNodeId, content !== null)
+  const emptyUniverse = isEmptyMemoryUniverse(nodes, loading)
 
   const loadNodes = useCallback(async (clusterId: string | null, cursor: string | null, append: boolean) => {
     if (requestRef.current) requestRef.current.abort()
@@ -157,6 +158,7 @@ export function MemoryUniverse({ status, busy, onNavigate }: Pick<JarvisWorkspac
         <label className="memory-universe-search absolute left-4 top-4 z-10 flex items-center gap-2"><Search className="h-4 w-4" /><input value={search} onChange={event => { setSearch(event.target.value); if (!event.target.value) setSearchResults([]) }} placeholder="Sichere Metadaten durchsuchen" aria-label="Memory Universe durchsuchen" /></label>
         {searchResults.length > 0 && <div className="memory-universe-search-results absolute left-4 top-16 z-20 w-72"><p className="px-3 py-2 text-[10px] uppercase tracking-[.16em] text-cyan-200/80">Suchergebnisse</p>{searchResults.map(node => <button type="button" key={node.id} onClick={() => { setSearch(''); setSearchResults([]); selectCluster(node.visual.cluster_id); selectNode(node.id) }}><span>{node.label}</span><small>{node.category}</small></button>)}</div>}
         {loading ? <LoadingUniverse /> : webglAvailable ? <MemoryUniverseScene clusters={clusters} nodes={nodes} edges={edges} selectedNodeId={selectedNodeId} selectedClusterId={selectedClusterId} reducedMotion={reducedMotion} onSelectNode={selectNode} onSelectCluster={selectCluster} /> : <FallbackUniverse clusters={clusters} nodes={nodes} onSelectCluster={selectCluster} onSelectNode={selectNode} />}
+        {emptyUniverse && <EmptyUniverseNotice webglAvailable={webglAvailable} />}
         <div className="memory-universe-overlay bottom-4 left-4"><span>{nodes.length} sichtbare Nodes</span><span>{edges.length} sichtbare Kanten</span><span>{reducedMotion ? 'Bewegung reduziert' : 'Ambient Mode'}</span></div>
         <div className="memory-universe-overlay right-4 top-4"><Crosshair className="h-3.5 w-3.5" /><span>Drag: Kamera · Scroll: Zoom</span></div>
         <UniverseMinimap clusters={clusters} selectedClusterId={selectedClusterId} onSelectCluster={selectCluster} />
@@ -169,6 +171,8 @@ export function MemoryUniverse({ status, busy, onNavigate }: Pick<JarvisWorkspac
 }
 
 function LoadingUniverse() { return <div className="memory-universe-loading"><LoaderCircle className="h-5 w-5 animate-spin" />Memory Universe wird geladen…</div> }
+
+function EmptyUniverseNotice({ webglAvailable }: { webglAvailable: boolean }) { return <div className="memory-universe-empty-notice" role="status"><Network className="h-6 w-6" /><h3>Dieses Profil hat aktuell keine Memory-Einträge.</h3><p>{webglAvailable ? 'Der zentrale HERMES-Kern bleibt als dekorativer Leerzustand sichtbar. Es wurden keine Knoten, Cluster oder Verbindungen erzeugt.' : 'Die zugängliche Leeransicht enthält keine künstlichen Memory-Daten.'}</p></div> }
 
 function UniverseMinimap({ clusters, selectedClusterId, onSelectCluster }: { clusters: MemoryUniverseCluster[]; selectedClusterId: string | null; onSelectCluster: (id: string) => void }) {
   return <nav className="memory-universe-minimap" aria-label="Memory-Cluster Übersicht"><p>Cluster Map</p>{clusters.slice(0, 8).map(cluster => <button type="button" key={cluster.id} aria-pressed={selectedClusterId === cluster.id} onClick={() => onSelectCluster(cluster.id)}><i /><span>{cluster.label}</span><small>{cluster.node_count}</small></button>)}</nav>

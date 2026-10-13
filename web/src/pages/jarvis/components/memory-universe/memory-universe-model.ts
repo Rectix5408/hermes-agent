@@ -54,3 +54,8 @@ export function categoryColor(category: string, kind: MemoryUniverseNode['kind']
 export function visibleNodes(nodes: MemoryUniverseNode[]): MemoryUniverseNode[] {
   return nodes.slice(0, MEMORY_UNIVERSE_LIMITS.maxVisibleNodes)
 }
+
+/** A zero-node response is a real, honest empty profile — never a demo graph. */
+export function isEmptyMemoryUniverse(nodes: MemoryUniverseNode[], loading: boolean): boolean {
+  return !loading && nodes.length === 0
+}
