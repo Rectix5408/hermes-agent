@@ -7,6 +7,7 @@ import { useToast } from '@nous-research/ui/hooks/use-toast'
 import { api } from '@/lib/api'
 import { GatewayClient } from '@/lib/gatewayClient'
 import { HermesVoiceConversation, type VoiceApprovalDisplay, type VoiceToolActivity } from './jarvis/voice-runtime/hermes-conversation'
+import { StreamingTtsPlayer } from './jarvis/voice-runtime/streaming-tts'
 import type { JarvisOrchestrationResponse, JarvisStatusResponse, MemoryStatus } from '@/lib/api'
 import { ApiError, errorMessage } from '@/lib/api-error'
 import { useProfileScope } from '@/contexts/useProfileScope'
@@ -16,6 +17,8 @@ import { emit } from './jarvis/runtime/event-bus'
 import { captureMicrophone, captureBrowserSpeech } from './jarvis/voice-runtime/microphone'
 import { applyVoiceSpeedCommand, loadVoiceSettings } from './jarvis/cinematic/voice-settings'
 import { appendVoiceHistory, microphoneErrorMessage, transitionVoiceState, type ProductionVoiceState, type VoiceHistoryEntry } from './jarvis/voice-runtime/production-state'
+
+const CONTINUOUS_VOICE_REARM_DELAY_MS = 350
 
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -60,6 +63,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   const [voiceBusy, setVoiceBusy] = useState<'recording' | 'transcribing' | 'thinking' | 'speaking' | null>(null)
   const [voiceState, setVoiceState] = useState<ProductionVoiceState>('idle')
   const [voiceHistory, setVoiceHistory] = useState<VoiceHistoryEntry[]>([])
+  const [continuousVoice, setContinuousVoice] = useState(false)
   const [autoSpeak, setAutoSpeak] = useState(false)
   const [voiceStream, setVoiceStream] = useState<MediaStream | null>(null)
   const [voiceResponse, setVoiceResponse] = useState('')
@@ -69,17 +73,35 @@ function ProfileWorkspace({ profile }: { profile: string }) {
   const [voiceSessionReady, setVoiceSessionReady] = useState(false)
   const [voiceTools, setVoiceTools] = useState<VoiceToolActivity[]>([])
   const ttsSignal = useRef<AbortSignal | null>(null)
+  const streamingTts = useRef<StreamingTtsPlayer | null>(null)
   const voiceOperation = useRef<AbortController | null>(null)
   const captureStop = useRef<(() => void) | null>(null)
+  const continuousVoiceRef = useRef(false)
+  const continuousVoiceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const runLock = useRef(false)
   const [approvalBusy, setApprovalBusy] = useState(false)
   const approvalLock = useRef(false)
   const [approvalHistory, setApprovalHistory] = useState<string[]>([])
+  const clearContinuousVoiceTimer = () => {
+    if (continuousVoiceTimer.current !== null) clearTimeout(continuousVoiceTimer.current)
+    continuousVoiceTimer.current = null
+  }
+  const setContinuousVoiceEnabled = (enabled: boolean) => {
+    continuousVoiceRef.current = enabled
+    setContinuousVoice(enabled)
+    if (!enabled) clearContinuousVoiceTimer()
+  }
   const cancelVoice = useCallback(() => {
+    continuousVoiceRef.current = false
+    setContinuousVoice(false)
+    if (continuousVoiceTimer.current !== null) clearTimeout(continuousVoiceTimer.current)
+    continuousVoiceTimer.current = null
     voiceOperation.current?.abort()
     voiceOperation.current = null
     captureStop.current?.()
     captureStop.current = null
+    streamingTts.current?.stop()
+    streamingTts.current = null
     playerRef.current?.pause()
     ttsSignal.current = null
     setVoiceStream(null)
@@ -98,6 +120,10 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       lifetime.current.abort()
       refreshRequest.current?.abort()
       playerRef.current?.pause()
+      if (continuousVoiceTimer.current !== null) clearTimeout(continuousVoiceTimer.current)
+      continuousVoiceTimer.current = null
+      streamingTts.current?.stop()
+      streamingTts.current = null
       voiceOperation.current?.abort()
       captureStop.current?.()
       conversation.current?.close()
@@ -242,7 +268,11 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     }
   }
 
-  const executeVoiceCommand = async (transcript: string, signal: AbortSignal): Promise<string> => {
+  const executeVoiceCommand = async (
+    transcript: string,
+    signal: AbortSignal,
+    onDelta?: (text: string) => void,
+  ): Promise<string> => {
     const speed = applyVoiceSpeedCommand(transcript, profile)
     if (speed) return `Sprechgeschwindigkeit auf ${speed.speed.toFixed(2)} angepasst.`
     // Preserve the user's intent and conversation context. The native agent,
@@ -250,8 +280,11 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     setVoiceBusy('thinking')
     setVoicePhase('thinking')
     if (!conversation.current) conversation.current = new HermesVoiceConversation(profile, () => new GatewayClient(), setVoiceApproval)
-    const reply = await conversation.current.submit(transcript, signal, text => {
-      if (!signal.aborted && !lifetime.current.signal.aborted) setVoiceResponse(text)
+    const reply = await conversation.current.submit(transcript, signal, (text, delta) => {
+      if (!signal.aborted && !lifetime.current.signal.aborted) {
+        setVoiceResponse(text)
+        if (delta) onDelta?.(delta)
+      }
     }, activity => {
       if (!signal.aborted && !lifetime.current.signal.aborted) setVoiceTools(items => [...items, activity].slice(-20))
     })
@@ -265,16 +298,52 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     setVoiceResponse('')
     setVoiceTools([])
     setRequest(transcript)
-    const action = await executeVoiceCommand(transcript, signal)
+    const settings = loadVoiceSettings(profile)
+    const liveSpeech = status?.voice?.tts.configured
+      ? new StreamingTtsPlayer(profile, signal, settings.speed, {
+          onAudioStart: () => {
+            if (!signal.aborted && !lifetime.current.signal.aborted) {
+              setVoiceBusy('speaking')
+              setVoicePhase('speaking')
+            }
+          },
+        })
+      : null
+    if (liveSpeech) {
+      streamingTts.current = liveSpeech
+      liveSpeech.start()
+    }
+    let action: string
+    try {
+      action = await executeVoiceCommand(transcript, signal, delta => liveSpeech?.push(delta))
+    } catch (error) {
+      liveSpeech?.stop()
+      if (streamingTts.current === liveSpeech) streamingTts.current = null
+      throw error
+    }
     if (signal.aborted) return
     setVoiceHistory(history => appendVoiceHistory(history, transcript, action))
     setVoiceResponse(action)
-    if (status?.voice?.tts.configured) await speak(action, loadVoiceSettings(profile).speed, signal)
+    if (liveSpeech) {
+      const streamResult = await liveSpeech.finish()
+      if (streamingTts.current === liveSpeech) streamingTts.current = null
+      if (signal.aborted) return
+      if (streamResult === 'fallback' || (streamResult === 'failed' && !liveSpeech.hasProducedAudio)) {
+        await speak(action, settings.speed, signal)
+      } else if (streamResult === 'failed') {
+        setError('Live-Sprachausgabe wurde unterbrochen. Die Antwort bleibt im Gespräch sichtbar; sie wird nicht automatisch wiederholt.')
+        setVoicePhase('error')
+      }
+    }
     if (!signal.aborted) setVoiceState(current => current === 'error' ? current : 'idle')
   }
 
   const recordVoice = async () => {
-    if (ttsSignal.current) cancelVoice()
+    if (ttsSignal.current) {
+      const continueAfterInterrupt = continuousVoiceRef.current
+      cancelVoice()
+      if (continueAfterInterrupt) setContinuousVoiceEnabled(true)
+    }
     if (lifetime.current.signal.aborted || voiceOperation.current || runLock.current) return
     const settings = loadVoiceSettings(profile)
     if (settings.sttEngine === 'disabled') { setError('Bitte eine Spracherkennung auswählen.'); return }
@@ -285,6 +354,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
     setVoiceState('listening')
     setError('')
     let stage: 'microphone' | 'stt' | 'agent' = 'microphone'
+    let completed = false
     try {
       const capture = settings.sttEngine === 'browser-speech'
         ? captureBrowserSpeech(signal)
@@ -308,6 +378,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
       emit({ profile, source: 'voice', type: 'TRANSCRIPTION_COMPLETED', status: 'completed' })
       stage = 'agent'
       await processVoiceTranscript(transcript, signal)
+      completed = !signal.aborted
     } catch (err) {
       if (!signal.aborted) {
         const messages = {
@@ -324,11 +395,23 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         captureStop.current = null
         setVoiceBusy(null)
         setVoiceState(current => current === 'error' ? current : 'idle')
+        if (completed && continuousVoiceRef.current && !lifetime.current.signal.aborted) {
+          clearContinuousVoiceTimer()
+          continuousVoiceTimer.current = setTimeout(() => {
+            continuousVoiceTimer.current = null
+            if (continuousVoiceRef.current && !voiceOperation.current && !lifetime.current.signal.aborted) void recordVoice()
+          }, CONTINUOUS_VOICE_REARM_DELAY_MS)
+        }
       }
     }
   }
 
   const stopVoice = () => { captureStop.current?.() }
+
+  const toggleContinuousVoice = (enabled: boolean) => {
+    setContinuousVoiceEnabled(enabled)
+    if (enabled && !voiceOperation.current && !ttsSignal.current && !runLock.current) void recordVoice()
+  }
 
   const continueVoiceInChat = async () => {
     if (!conversation.current || voiceOperation.current || runLock.current) return
@@ -408,6 +491,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         voiceBusy={voiceBusy}
         voiceState={voiceState}
         voiceHistory={voiceHistory}
+        continuousVoice={continuousVoice}
         voiceStream={voiceStream}
         voiceResponse={voiceResponse}
         voiceProgress={voiceProgress}
@@ -416,6 +500,7 @@ function ProfileWorkspace({ profile }: { profile: string }) {
         onContinueVoiceInChat={voiceSessionReady ? continueVoiceInChat : undefined}
         onVoiceApprovalDecision={(id, choice) => { conversation.current?.decideApproval(id, choice) }}
         onCancelVoice={cancelVoice}
+        onContinuousVoiceChange={toggleContinuousVoice}
         approvalBusy={approvalBusy}
         approvalHistory={approvalHistory}
         autoSpeak={autoSpeak}

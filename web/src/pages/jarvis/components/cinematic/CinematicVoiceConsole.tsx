@@ -111,9 +111,15 @@ interface VoicePanelProps { props: JarvisWorkspaceProps; view: ReturnType<typeof
 
 function VoiceReactor({ props, view }: VoicePanelProps) {
   const { stream, permission, activeDeviceName, settings, canvasRef, recording, canStart, response, locked, tts, inputAvailable, disabledMode, browserMode } = view
+  const latestTool = props.voiceTools?.at(-1)
+  const liveStatus = props.voiceApproval
+    ? 'Jarvis wartet auf deine Freigabe'
+    : latestTool?.status === 'started'
+      ? `Jarvis führt einen Werkzeugschritt aus: ${latestTool.name}`
+      : labels[props.voiceState]
   return <div className="voice-reactor">
         <AudioHologram state={props.voiceState} />
-        <h2 className="mt-6" role="status">{labels[props.voiceState]}</h2>
+        <h2 className="mt-6" role="status">{liveStatus}</h2>
         <dl className="operations-facts">
           <div><dt>Berechtigung</dt><dd>{stream ? 'Erlaubt' : permission}</dd></div>
           <div><dt>Mikrofon</dt><dd>{activeDeviceName}</dd></div>
@@ -127,8 +133,14 @@ function VoiceReactor({ props, view }: VoicePanelProps) {
             {recording ? 'Aufnahme beenden' : props.voiceBusy === 'speaking' ? 'Unterbrechen und sprechen' : 'Zuhören starten'}
           </Button>
           <Button outlined disabled={!props.voiceBusy} onClick={props.onCancelVoice}><X size={16} />Abbrechen</Button>
+          {props.onContinuousVoiceChange && <Button outlined disabled={!!props.busy} onClick={() => props.onContinuousVoiceChange?.(!props.continuousVoice)}>
+            {props.continuousVoice ? 'Fortlaufenden Dialog beenden' : 'Fortlaufenden Dialog starten'}
+          </Button>}
           <Button outlined disabled={!response || locked || !tts?.configured} onClick={() => response && props.onSpeak(response, settings.speed)}><Volume2 size={16} />Antwort sprechen</Button>
         </div>
+        <p role="status">{props.continuousVoice
+          ? 'Fortlaufender Dialog aktiv: Nach einer vollständig beendeten Antwort öffnet Jarvis die nächste Aufnahme. Mit „Abbrechen“ stoppst du sofort.'
+          : 'Mikrofon bleibt aus, bis du bewusst „Zuhören starten“ wählst.'}</p>
         {props.voiceState === 'speaking' && <progress aria-label="Wiedergabefortschritt" max={1} value={Math.min(1, Math.max(0, props.voiceProgress ?? 0))} />}
         {!inputAvailable && !disabledMode && <p role="alert"><AlertCircle size={16} />{browserMode ? 'Browser Speech wird hier nicht unterstützt. Wähle Hermes-STT.' : 'Mikrofonaufnahme nicht verfügbar. Prüfe HTTPS und Browserberechtigungen.'}</p>}
       </div>
@@ -157,12 +169,13 @@ function VoiceSettingsPanel({ view }: VoicePanelProps) {
 
 function VoiceTranscript({ props, view }: VoicePanelProps) {
   const { response, locked, disabledMode, browserMode, browserAvailable, stt } = view
+  const latestTool = props.voiceTools?.at(-1)
   return <section className="voice-transcript" aria-label="Sprachprotokoll">
       <h2>Erkannt und beantwortet</h2>
       <p>Nur in dieser Profil-Sitzung, maximal 20 Einträge. Keine zusätzliche Speicherung im Browser.</p>
       {props.voiceHistory.length ? <ol>{props.voiceHistory.map(entry => <li key={entry.id}><time>{new Date(entry.timestamp).toLocaleTimeString('de-DE')}</time><p>{entry.text}</p><p>{entry.action}</p></li>)}</ol> : <p>Noch keine Spracheingabe.</p>}
       {response && <section aria-label="Hermes-Sprachantwort" aria-busy={props.voiceState === 'thinking'}><h3>Letzte Hermes-Antwort</h3><p className="whitespace-pre-wrap break-words">{response}</p></section>}
-      {!!props.voiceTools?.length && <section aria-label="Gemeldete Werkzeugaktivität"><h3>Werkzeugaktivität dieser Anfrage</h3><ul>{props.voiceTools.map((activity, index) => <li key={index}>{activity.name} · {activity.status === 'started' ? 'Gestartet' : 'Beendet (kein Erfolgsnachweis)'}</li>)}</ul></section>}
+      {!!props.voiceTools?.length && <section aria-label="Gemeldete Werkzeugaktivität"><h3>Werkzeugaktivität dieser Anfrage</h3>{latestTool?.status === 'started' && <p role="status">Jarvis führt den gemeldeten Werkzeugschritt aus. Es wird kein Ergebnis vorweggenommen.</p>}<ul>{props.voiceTools.map((activity, index) => <li key={index}>{activity.name} · {activity.status === 'started' ? 'Gestartet' : 'Beendet (kein Erfolgsnachweis)'}</li>)}</ul></section>}
       {props.onContinueVoiceInChat && <Button outlined disabled={locked} onClick={props.onContinueVoiceInChat}>Gespräch im Hermes Chat fortsetzen</Button>}
       <details><summary><ChevronDown size={16} />Technische Diagnose & Hinweise</summary>
         <p>{props.status?.ok ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}{props.status?.ok ? 'Hermes-Status erreichbar' : 'Hermes-Status nicht verfügbar'}</p>
@@ -175,7 +188,7 @@ function VoiceTranscript({ props, view }: VoicePanelProps) {
 export function CinematicVoiceConsole(props: JarvisWorkspaceProps) {
   const view = useVoiceConsole(props)
   return <section className="command-panel voice-console" aria-label="HERMES Sprachsteuerung">
-    <header><p className="text-xs uppercase tracking-widest text-cyan-300">HERMES Voice Control</p><h1>Sprich mit Jarvis</h1><p>Eine Aufnahme. Eine klare Antwort. Keine Hintergrundaufnahme.</p></header>
+    <header><p className="text-xs uppercase tracking-widest text-cyan-300">HERMES Voice Control</p><h1>Sprich mit Jarvis</h1><p>Freier Dialog in einer Profil-Sitzung. Das Mikrofon bleibt ohne bewusste Aktivierung aus.</p></header>
     <div className="voice-layout">
       <VoiceReactor props={props} view={view} />
       <VoiceSettingsPanel props={props} view={view} />

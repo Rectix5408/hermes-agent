@@ -179,7 +179,7 @@ export class HermesVoiceConversation {
     return this.initializing
   }
 
-  async submit(spokenText: string, signal?: AbortSignal, onTextChanged: (text: string) => void = () => {}, onToolActivity: (activity: VoiceToolActivity) => void = () => {}): Promise<VoiceTurnResult> {
+  async submit(spokenText: string, signal?: AbortSignal, onTextChanged: (text: string, delta?: string) => void = () => {}, onToolActivity: (activity: VoiceToolActivity) => void = () => {}): Promise<VoiceTurnResult> {
     if (this.active) throw new Error('Jarvis bearbeitet bereits eine Sprachanfrage.')
     if (this.disposed) throw new Error('Die Jarvis-Sprachsitzung wurde geschlossen.')
     const text = spokenText.trim()
@@ -257,7 +257,7 @@ export class HermesVoiceConversation {
             const payload = event.payload as { text?: unknown } | undefined
             if (typeof payload?.text === 'string' && streamed.length < MAX_REPLY_CHARS) {
               streamed += payload.text.slice(0, MAX_REPLY_CHARS - streamed.length)
-              onTextChanged(streamed)
+              onTextChanged(streamed, payload.text)
             }
           }
           if (event.type === 'message.complete') settle((event.payload ?? {}) as CompletedPayload)

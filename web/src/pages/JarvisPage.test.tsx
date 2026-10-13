@@ -12,6 +12,7 @@ const seam = vi.hoisted(() => ({ props: null as JarvisWorkspaceProps | null }))
 const mocked = vi.hoisted(() => ({
   getJarvisStatus: vi.fn(), getMemory: vi.fn(), planJarvis: vi.fn(),
   runJarvis: vi.fn(), runJarvisAgent: vi.fn(), speakText: vi.fn(),
+  buildWsUrl: vi.fn(),
   setEnd: vi.fn(), setTitle: vi.fn(), showToast: vi.fn(), transcribeAudio: vi.fn(),
   captureMicrophone: vi.fn(), decideJarvisApproval: vi.fn(),
 }))
@@ -41,6 +42,7 @@ beforeEach(() => {
   mocked.getJarvisStatus.mockResolvedValue(status)
   mocked.getMemory.mockResolvedValue(null)
   mocked.planJarvis.mockResolvedValue({ status: 'planned' })
+  mocked.buildWsUrl.mockRejectedValue(new Error('synthetic stream unavailable'))
   gateway.connect.mockResolvedValue(undefined)
   gateway.request.mockImplementation(async (method: string) => method === 'session.create' ? { session_id: 'voice-A', stored_session_id: 'stored-A' } : { status: 'streaming' })
   gateway.onAny.mockReturnValue(vi.fn())
@@ -69,6 +71,7 @@ describe('Jarvis session boundary', () => {
     act(() => { turn = seam.props!.onVoiceTranscript('Hallo') })
     await act(async () => { await Promise.resolve() })
     await act(async () => gateway.onAny.mock.calls.at(-1)![0]({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Antwort', status: 'complete' } }))
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
     expect(seam.props!.voiceState).toBe('speaking')
     const oldSignal = mocked.speakText.mock.calls.at(-1)![2] as AbortSignal
     let recording: unknown
@@ -119,6 +122,85 @@ describe('Jarvis session boundary', () => {
     await act(async () => { gateway.onAny.mock.calls.at(-1)![0]({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Gerne' } }); await turn })
     expect(gateway.request.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
     expect(seam.props!.voiceHistory).toHaveLength(2)
+  })
+  it('shows only server-originated tool lifecycle metadata for a native voice turn', async () => {
+    await render('A')
+    let turn!: unknown
+    act(() => { turn = seam.props!.onVoiceTranscript('Prüfe autorisierte Informationen') })
+    await act(async () => { await Promise.resolve() })
+    const emit = gateway.onAny.mock.calls.at(-1)![0]
+    await act(async () => emit({ type: 'tool.start', session_id: 'voice-A', payload: { name: 'mail', args: { secret: 'never shown' } } }))
+    expect(seam.props!.voiceTools).toEqual([{ name: 'mail', status: 'started' }])
+    await act(async () => emit({ type: 'tool.complete', session_id: 'voice-A', payload: { name: 'mail', result: 'private tool result' } }))
+    await act(async () => { emit({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Hermes hat die autorisierten Informationen geprüft.', status: 'complete' } }); await turn })
+    expect(seam.props!.voiceTools).toEqual([
+      { name: 'mail', status: 'started' },
+      { name: 'mail', status: 'finished' },
+    ])
+    expect(mocked.runJarvis).not.toHaveBeenCalled()
+    expect(mocked.runJarvisAgent).not.toHaveBeenCalled()
+  })
+  it('re-arms an explicitly enabled continuous dialogue only after a completed response', async () => {
+    mocked.transcribeAudio.mockResolvedValue({ transcript: 'Guten Morgen, Jarvis' })
+    const stopNextCapture = vi.fn()
+    mocked.captureMicrophone
+      .mockReturnValueOnce({ recording: Promise.resolve(new Blob(['first'], { type: 'audio/webm' })), stop: vi.fn() })
+      .mockReturnValueOnce({ recording: new Promise((_resolve, reject) => { stopNextCapture.mockImplementation(() => reject(new DOMException('Cancelled', 'AbortError'))) }), stop: stopNextCapture })
+    gateway.onAny.mockImplementationOnce(handler => {
+      queueMicrotask(() => handler({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Guten Morgen. Wie kann ich helfen?', status: 'complete' } }))
+      return vi.fn()
+    })
+    await render('A')
+    act(() => { seam.props!.onContinuousVoiceChange?.(true) })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 450)) })
+    expect(seam.props!.continuousVoice).toBe(true)
+    expect(mocked.captureMicrophone).toHaveBeenCalledTimes(2)
+    expect(gateway.request.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+    expect(mocked.runJarvis).not.toHaveBeenCalled()
+    expect(seam.props!.voiceState).toBe('listening')
+    await act(async () => { seam.props!.onCancelVoice?.(); await Promise.resolve() })
+    expect(stopNextCapture).toHaveBeenCalled()
+  })
+  it('forwards gateway deltas to speak-stream and uses the existing fallback only when the server requests it', async () => {
+    mocked.getJarvisStatus.mockResolvedValue({ ...status, voice: { tts: { configured: true } } })
+    mocked.speakText.mockResolvedValue({ data_url: 'data:audio/wav;base64,AA==' })
+    mocked.buildWsUrl.mockResolvedValue('ws://synthetic/audio')
+    type FakeSocket = { open: () => void; message: (data: string) => void; sent: string[] }
+    let socket: FakeSocket | null = null
+    function StreamSocket() {
+      const created = {
+        binaryType: 'blob' as BinaryType,
+        readyState: 0,
+        onopen: null as null | ((event: Event) => void),
+        onerror: null,
+        onclose: null,
+        onmessage: null as null | ((event: MessageEvent) => void),
+        sent: [] as string[],
+        send(data: string) { created.sent.push(data) },
+        close() { created.readyState = 3 },
+        open() { created.readyState = 1; created.onopen?.(new Event('open')) },
+        message(data: string) { created.onmessage?.(new MessageEvent('message', { data })) },
+      }
+      socket = created
+      return created
+    }
+    vi.stubGlobal('WebSocket', StreamSocket)
+    class Player { playbackRate = 1; onended: (() => void) | null = null; onerror = null; ontimeupdate = null; pause() {}; play() { queueMicrotask(() => this.onended?.()); return Promise.resolve() } }
+    vi.stubGlobal('Audio', Player)
+    await render('A')
+    let turn: unknown
+    act(() => { turn = seam.props!.onVoiceTranscript('Sag etwas') })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    const activeSocket = () => socket as FakeSocket
+    activeSocket().open()
+    const emit = gateway.onAny.mock.calls.at(-1)![0]
+    await act(async () => emit({ type: 'message.delta', session_id: 'voice-A', payload: { text: 'Der erste Satz. ' } }))
+    expect(activeSocket().sent).toContain('{"text":"Der erste Satz. "}')
+    await act(async () => emit({ type: 'message.complete', session_id: 'voice-A', payload: { text: 'Der erste Satz.', status: 'complete' } }))
+    activeSocket().message('{"type":"fallback"}')
+    await act(async () => { await turn })
+    expect(activeSocket().sent).toContain('{"done":true}')
+    expect(mocked.speakText).toHaveBeenCalledWith('Der erste Satz.', 'A', expect.any(AbortSignal))
   })
   it('binds native approvals to the voice turn, refuses double input and clears it on profile change', async () => {
     await render('A')

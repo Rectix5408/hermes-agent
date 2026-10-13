@@ -13,6 +13,7 @@ export interface JarvisWorkspaceProps extends JarvisVisualProps {
   autoSpeak: boolean
   voiceState: ProductionVoiceState
   voiceHistory: VoiceHistoryEntry[]
+  continuousVoice?: boolean
   voiceStream?: MediaStream | null
   voiceResponse?: string
   voiceProgress?: number
@@ -21,6 +22,7 @@ export interface JarvisWorkspaceProps extends JarvisVisualProps {
   onContinueVoiceInChat?: () => void
   onVoiceApprovalDecision?: (id: string, choice: VoiceApprovalChoice) => void
   onCancelVoice?: () => void
+  onContinuousVoiceChange?: (enabled: boolean) => void
   approvalBusy?: boolean
   approvalHistory?: string[]
   onNavigate: (path: string) => void
