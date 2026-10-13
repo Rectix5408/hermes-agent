@@ -180,7 +180,7 @@ function VoiceReactor({ props, view }: VoicePanelProps) {
       </div>
 }
 
-function VoiceSettingsPanel({ view }: VoicePanelProps) {
+function VoiceSettingsPanel({ props, view }: VoicePanelProps) {
   const { settings, locked, update, stt, browserMode, devices, refreshDevices, deviceError, tts, notice } = view
   return <div className="voice-settings">
         <header className="voice-settings-header"><span className="voice-settings-icon"><Headphones size={18} /></span><div><h2>Spracheinstellungen</h2><p>Erkennung und Wiedergabe für dieses Profil.</p></div></header>
@@ -202,6 +202,10 @@ function VoiceSettingsPanel({ view }: VoicePanelProps) {
           <h3>Sprachausgabe</h3>
           <p className="voice-setting-help">Sprache: Deutsch (Browser). Hermes-STT verwendet die Serverkonfiguration.</p>
           <p className="voice-setting-help">{tts?.configured ? `Anbieter: ${tts.provider || 'Konfigurierter Anbieter'}. Stimme und Voice-ID werden serverseitig verwaltet.` : 'Sprachausgabe ist für dieses Profil nicht eingerichtet.'}</p>
+          <Button className="voice-server-voice" outlined disabled={locked} onClick={() => props.onNavigate('/config')}>
+            Serverstimme verwalten
+          </Button>
+          <p className="voice-setting-help">Die Auswahl wird erst im autorisierten Hermes-Konfigurationsdialog gespeichert. Diese Seite ändert keine Voice-ID.</p>
           <label className="command-field"><span>Wiedergabegeschwindigkeit <strong>{settings.speed.toFixed(2)}×</strong></span><input aria-label="Wiedergabegeschwindigkeit" type="range" min=".75" max="1.25" step=".05" value={settings.speed} onChange={event => update({ speed: Number(event.target.value) })} /></label>
         </section>
         {notice && <p className="voice-settings-notice" role="status">{notice}</p>}
